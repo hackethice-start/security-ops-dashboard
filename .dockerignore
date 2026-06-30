@@ -11,3 +11,5 @@ yarn-error.log*
 coverage
 .nyc_output
 *.md
+.vite
+dist
