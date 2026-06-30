@@ -439,59 +439,6 @@ function HBar({ label, value, max, color }) {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  NAV SIDEBAR                                                            ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-const NAV = [
-  { icon: "🏠", label: "Overview" },
-  { icon: "🔥", label: "Firewall (FG + PA)" },
-  { icon: "🌐", label: "Attack Surface" },
-  { icon: "☁️", label: "Cloud Security" },
-  { icon: "🐛", label: "Vulnerabilities" },
-  { icon: "🖥️", label: "Assets & Patches" },
-  { icon: "🔐", label: "Encryption" },
-  { icon: "🚨", label: "Incidents" },
-  { icon: "📊", label: "Reports" },
-  { icon: "⚙️", label: "Settings" },
-];
-
-function Sidebar({ active, setActive }) {
-  return (
-    <div className="w-52 min-h-screen bg-[#0d1b2a] flex flex-col py-4 flex-shrink-0">
-      <div className="px-4 mb-5">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-2xl">🛡️</span>
-          <div>
-            <div className="text-white text-xs font-black tracking-wide">SECURITY</div>
-            <div className="text-blue-400 text-[10px] font-bold tracking-widest">OPERATIONS</div>
-          </div>
-        </div>
-        <div className="text-[9px] text-gray-500 mt-1 leading-tight">
-          Fortinet · PaloAlto · UpGuard<br />Azure · Qualys · ManageEngine
-        </div>
-      </div>
-      <nav className="flex-1">
-        {NAV.map((item) => (
-          <button key={item.label} onClick={() => setActive(item.label)}
-            className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-all ${
-              active === item.label
-                ? "bg-blue-600 text-white font-semibold border-r-2 border-blue-300"
-                : "text-gray-400 hover:bg-[#1a2d45] hover:text-white"
-            }`}>
-            <span>{item.icon}</span><span className="text-xs">{item.label}</span>
-          </button>
-        ))}
-      </nav>
-      <div className="px-4 pb-2">
-        <div className="text-[9px] text-gray-600 text-center">
-          {Object.values(CONFIG).some(c => Object.values(c).some(v => v))
-            ? "🟢 APIs Connected" : "🟡 Demo Mode"}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  OVERVIEW PAGE                                                          ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 function OverviewPage({ d }) {
