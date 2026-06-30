@@ -1,0 +1,96 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Production Compose – uses pre-built images from ghcr.io
+# This file is deployed to the Ubuntu server by GitHub Actions.
+# Do NOT use docker-compose.yml (which builds locally) in production.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  db:
+    image: postgres:16-alpine
+    container_name: secops-db
+    restart: always
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-secops}
+      POSTGRES_USER:     ${POSTGRES_USER:-secops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-secops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "5" }
+
+  backend:
+    image: ${REGISTRY:-ghcr.io}/${GITHUB_OWNER}/secops-backend:${IMAGE_TAG:-latest}
+    container_name: secops-backend
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT:              4000
+      NODE_ENV:          production
+      POSTGRES_HOST:     db
+      POSTGRES_PORT:     5432
+      POSTGRES_DB:       ${POSTGRES_DB:-secops}
+      POSTGRES_USER:     ${POSTGRES_USER:-secops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      FORTINET_HOST:     ${FORTINET_HOST}
+      FORTINET_APIKEY:   ${FORTINET_APIKEY}
+      PALOALTO_HOST:     ${PALOALTO_HOST}
+      PALOALTO_APIKEY:   ${PALOALTO_APIKEY}
+      UPGUARD_APIKEY:    ${UPGUARD_APIKEY}
+      AZURE_TENANT_ID:       ${AZURE_TENANT_ID}
+      AZURE_CLIENT_ID:       ${AZURE_CLIENT_ID}
+      AZURE_CLIENT_SECRET:   ${AZURE_CLIENT_SECRET}
+      AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID}
+      QUALYS_USERNAME:   ${QUALYS_USERNAME}
+      QUALYS_PASSWORD:   ${QUALYS_PASSWORD}
+      ME_HOST:           ${ME_HOST}
+      ME_APIKEY:         ${ME_APIKEY}
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  dashboard:
+    image: ${REGISTRY:-ghcr.io}/${GITHUB_OWNER}/secops-dashboard:${IMAGE_TAG:-latest}
+    container_name: secops-dashboard
+    restart: always
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  pg_data:
+    driver: local
+
+networks:
+  default:
+    name: secops-net
