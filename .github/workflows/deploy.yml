@@ -15,39 +15,76 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Ensure docker compose plugin is installed
+        run: |
+          if ! docker compose version &>/dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y docker-compose-plugin
+          fi
+          docker compose version
+
       - name: Write .env file
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          FORTINET_HOST: ${{ secrets.FORTINET_HOST }}
+          FORTINET_APIKEY: ${{ secrets.FORTINET_APIKEY }}
+          PALOALTO_HOST: ${{ secrets.PALOALTO_HOST }}
+          PALOALTO_APIKEY: ${{ secrets.PALOALTO_APIKEY }}
+          UPGUARD_APIKEY: ${{ secrets.UPGUARD_APIKEY }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          QUALYS_USERNAME: ${{ secrets.QUALYS_USERNAME }}
+          QUALYS_PASSWORD: ${{ secrets.QUALYS_PASSWORD }}
+          ME_HOST: ${{ secrets.ME_HOST }}
+          ME_APIKEY: ${{ secrets.ME_APIKEY }}
         run: |
           mkdir -p /opt/secops
-          cat > /opt/secops/.env << EOF
-          DASHBOARD_PORT=3000
-          POSTGRES_DB=secops
-          POSTGRES_USER=secops
-          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
-          REACT_APP_FORTINET_HOST=${{ secrets.FORTINET_HOST }}
-          REACT_APP_FORTINET_APIKEY=${{ secrets.FORTINET_APIKEY }}
-          REACT_APP_PALOALTO_HOST=${{ secrets.PALOALTO_HOST }}
-          REACT_APP_PALOALTO_APIKEY=${{ secrets.PALOALTO_APIKEY }}
-          REACT_APP_UPGUARD_APIKEY=${{ secrets.UPGUARD_APIKEY }}
-          REACT_APP_AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}
-          REACT_APP_AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}
-          REACT_APP_AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}
-          REACT_APP_AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          REACT_APP_QUALYS_USERNAME=${{ secrets.QUALYS_USERNAME }}
-          REACT_APP_QUALYS_PASSWORD=${{ secrets.QUALYS_PASSWORD }}
-          REACT_APP_ME_HOST=${{ secrets.ME_HOST }}
-          REACT_APP_ME_APIKEY=${{ secrets.ME_APIKEY }}
-          REACT_APP_API_BASE_URL=http://192.168.101.10:4000
-          EOF
+          {
+            echo "DASHBOARD_PORT=3000"
+            echo "POSTGRES_DB=secops"
+            echo "POSTGRES_USER=secops"
+            echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+            echo "REACT_APP_FORTINET_HOST=${FORTINET_HOST}"
+            echo "REACT_APP_FORTINET_APIKEY=${FORTINET_APIKEY}"
+            echo "REACT_APP_PALOALTO_HOST=${PALOALTO_HOST}"
+            echo "REACT_APP_PALOALTO_APIKEY=${PALOALTO_APIKEY}"
+            echo "REACT_APP_UPGUARD_APIKEY=${UPGUARD_APIKEY}"
+            echo "REACT_APP_AZURE_TENANT_ID=${AZURE_TENANT_ID}"
+            echo "REACT_APP_AZURE_CLIENT_ID=${AZURE_CLIENT_ID}"
+            echo "REACT_APP_AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}"
+            echo "REACT_APP_AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}"
+            echo "REACT_APP_QUALYS_USERNAME=${QUALYS_USERNAME}"
+            echo "REACT_APP_QUALYS_PASSWORD=${QUALYS_PASSWORD}"
+            echo "REACT_APP_ME_HOST=${ME_HOST}"
+            echo "REACT_APP_ME_APIKEY=${ME_APIKEY}"
+            echo "REACT_APP_API_BASE_URL=http://192.168.101.10:4000"
+          } > /opt/secops/.env
 
-      - name: Build and start stack
+      - name: Copy project files to deploy dir
         run: |
           cp docker-compose.yml /opt/secops/docker-compose.yml
-          cp -r db /opt/secops/db
-          cd /opt/secops
-          docker compose up -d --build --remove-orphans
+          cp Dockerfile /opt/secops/Dockerfile
+          cp nginx.conf /opt/secops/nginx.conf
+          cp index.html /opt/secops/index.html
+          cp package.json /opt/secops/package.json
+          cp vite.config.js /opt/secops/vite.config.js
+          cp -r src /opt/secops/src
+          cp -r public /opt/secops/public
+          cp -r backend /opt/secops/backend
+          mkdir -p /opt/secops/db
+          cp db/schema.sql /opt/secops/db/schema.sql
+
+      - name: Build and start stack
+        working-directory: /opt/secops
+        run: |
+          docker compose down --remove-orphans || true
+          docker compose up --detach --build
+          docker compose ps
 
       - name: Clean up old images
-        run: docker image prune -f
+        run: docker image prune --force
 
       - name: Health check
         run: |
