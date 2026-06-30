@@ -147,7 +147,6 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
       name: production
-      url: http://${{ secrets.SERVER_HOST }}:3000
 
     steps:
       - name: Checkout code (for compose files)
@@ -244,3 +243,4 @@ jobs:
         run: |
           echo "::error::🚨 Deployment to ${{ secrets.SERVER_HOST }} FAILED on commit ${{ github.sha }}"
           echo "::error::Review logs above and check docker logs on the server"
+                                                  
