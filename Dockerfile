@@ -1,14 +1,7 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 – Build
-#   Installs dependencies and produces an optimised production build.
-#   Environment variables (REACT_APP_*) are baked in at build time.
-#   Pass them with --build-arg or via docker-compose build args.
-# ─────────────────────────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# ── Build-time API credentials (baked into the JS bundle) ────────────────────
 ARG REACT_APP_FORTINET_HOST=""
 ARG REACT_APP_FORTINET_APIKEY=""
 ARG REACT_APP_PALOALTO_HOST=""
@@ -22,8 +15,8 @@ ARG REACT_APP_QUALYS_USERNAME=""
 ARG REACT_APP_QUALYS_PASSWORD=""
 ARG REACT_APP_ME_HOST=""
 ARG REACT_APP_ME_APIKEY=""
+ARG REACT_APP_API_BASE_URL=""
 
-# Expose as env vars so react-scripts / vite picks them up
 ENV REACT_APP_FORTINET_HOST=$REACT_APP_FORTINET_HOST \
     REACT_APP_FORTINET_APIKEY=$REACT_APP_FORTINET_APIKEY \
     REACT_APP_PALOALTO_HOST=$REACT_APP_PALOALTO_HOST \
@@ -36,33 +29,24 @@ ENV REACT_APP_FORTINET_HOST=$REACT_APP_FORTINET_HOST \
     REACT_APP_QUALYS_USERNAME=$REACT_APP_QUALYS_USERNAME \
     REACT_APP_QUALYS_PASSWORD=$REACT_APP_QUALYS_PASSWORD \
     REACT_APP_ME_HOST=$REACT_APP_ME_HOST \
-    REACT_APP_ME_APIKEY=$REACT_APP_ME_APIKEY
+    REACT_APP_ME_APIKEY=$REACT_APP_ME_APIKEY \
+    REACT_APP_API_BASE_URL=$REACT_APP_API_BASE_URL \
+    CI=false \
+    GENERATE_SOURCEMAP=false
 
-# Install dependencies (cached layer)
 COPY package.json ./
 RUN npm install
 
-# Copy source and build
 COPY . .
 RUN npm run build
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 – Serve
-#   Lightweight Nginx image; only the compiled static files are copied over.
-#   No Node, no source code, no secrets in the final image.
-# ─────────────────────────────────────────────────────────────────────────────
 FROM nginx:1.27-alpine AS production
 
-# Remove default Nginx page
 RUN rm -rf /usr/share/nginx/html/*
 
-# Copy compiled React build
 COPY --from=builder /app/build /usr/share/nginx/html
-
-# Copy custom Nginx config (handles React Router / SPA fallback)
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
     && chown -R appuser:appgroup /usr/share/nginx/html \
     && chown -R appuser:appgroup /var/cache/nginx \
