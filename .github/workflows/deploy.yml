@@ -40,6 +40,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+
+      - name: Test build outside Docker
+        run: |
+          npm install
+          npm run build
+        env:
+          CI: "false"
+
       - name: Docker metadata - dashboard
         id: meta-dashboard
         uses: docker/metadata-action@v5
