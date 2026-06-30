@@ -39,8 +39,8 @@ ENV REACT_APP_FORTINET_HOST=$REACT_APP_FORTINET_HOST \
     REACT_APP_ME_APIKEY=$REACT_APP_ME_APIKEY
 
 # Install dependencies (cached layer)
-COPY package.json package-lock.json* ./
-RUN npm ci --prefer-offline
+COPY package.json ./
+RUN npm install
 
 # Copy source and build
 COPY . .
