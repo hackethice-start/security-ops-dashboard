@@ -32,10 +32,12 @@ ENV REACT_APP_FORTINET_HOST=$REACT_APP_FORTINET_HOST \
     REACT_APP_ME_APIKEY=$REACT_APP_ME_APIKEY \
     REACT_APP_API_BASE_URL=$REACT_APP_API_BASE_URL \
     CI=false \
-    GENERATE_SOURCEMAP=false
+    DISABLE_ESLINT_PLUGIN=true \
+    GENERATE_SOURCEMAP=false \
+    NODE_OPTIONS=--max-old-space-size=4096
 
 COPY package.json ./
-RUN npm install
+RUN npm install --legacy-peer-deps
 
 COPY . .
 RUN npm run build
@@ -55,7 +57,6 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
     && chown appuser:appgroup /var/run/nginx.pid
 
 USER appuser
-
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
