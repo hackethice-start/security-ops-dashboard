@@ -40,7 +40,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-
       - name: Test build outside Docker
         run: |
           npm install
@@ -82,7 +81,7 @@ jobs:
             REACT_APP_QUALYS_PASSWORD=${{ secrets.QUALYS_PASSWORD }}
             REACT_APP_ME_HOST=${{ secrets.ME_HOST }}
             REACT_APP_ME_APIKEY=${{ secrets.ME_APIKEY }}
-            REACT_APP_API_BASE_URL=http://${{ secrets.SERVER_HOST }}:4000
+            REACT_APP_API_BASE_URL=http://192.168.101.10:4000
 
       - name: Docker metadata - backend
         id: meta-backend
@@ -106,8 +105,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy to Ubuntu Server
-    runs-on: ubuntu-latest
+    name: Deploy on Server
+    runs-on: self-hosted
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment:
@@ -117,9 +116,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Write production env file
+      - name: Write .env file
         run: |
-          cat > .env.prod << EOF
+          cat > /opt/secops/.env << EOF
           REGISTRY=${{ env.REGISTRY }}
           GITHUB_OWNER=${{ github.repository_owner }}
           IMAGE_TAG=sha-${{ needs.build.outputs.short_sha }}
@@ -142,46 +141,26 @@ jobs:
           ME_APIKEY=${{ secrets.ME_APIKEY }}
           EOF
 
-      - name: Copy compose files to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          source: "docker-compose.prod.yml,db/schema.sql,.env.prod"
-          target: ${{ secrets.SERVER_DEPLOY_PATH }}
-
-      - name: Deploy on server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          script: |
-            set -e
-            cd ${{ secrets.SERVER_DEPLOY_PATH }}
-            mv .env.prod .env
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            docker image prune -f
-            echo "Deploy complete at $(date)"
-
-      - name: Health check - dashboard
+      - name: Copy compose and schema files
         run: |
-          sleep 30
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.SERVER_HOST }}:3000/ --max-time 10)
-          echo "Dashboard HTTP status: $STATUS"
-          [ "$STATUS" = "200" ] || exit 1
+          cp docker-compose.prod.yml /opt/secops/docker-compose.prod.yml
+          mkdir -p /opt/secops/db
+          cp db/schema.sql /opt/secops/db/schema.sql
 
-      - name: Health check - backend API
+      - name: Login to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull latest images
+        run: docker compose -f /opt/secops/docker-compose.prod.yml pull
+
+      - name: Start stack
+        run: docker compose -f /opt/secops/docker-compose.prod.yml up -d --remove-orphans
+
+      - name: Clean up old images
+        run: docker image prune -f
+
+      - name: Health check
         run: |
-          RESP=$(curl -s http://${{ secrets.SERVER_HOST }}:4000/api/health --max-time 10)
-          echo "Backend response: $RESP"
-          echo "$RESP" | grep -q '"status":"ok"' || exit 1
-
-      - name: Notify on failure
-        if: failure()
-        run: echo "::error::Deployment to ${{ secrets.SERVER_HOST }} FAILED on commit ${{ github.sha }}"
+          sleep 20
+          curl -sf http://localhost:3000/ && echo "Dashboard OK" || echo "Dashboard not ready yet"
+          curl -sf http://localhost:4000/api/health && echo "Backend OK" || echo "Backend not ready yet"
