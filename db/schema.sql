@@ -102,3 +102,25 @@ BEGIN
         ALTER TABLE integrations ADD COLUMN refresh_interval INTEGER DEFAULT 300;
     END IF;
 END $$;
+
+-- =============================================================================
+-- 5. USERS  (role-based access control)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS users (
+    id            UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
+    username      VARCHAR(50) UNIQUE NOT NULL,
+    password_hash TEXT        NOT NULL,
+    role          VARCHAR(20) NOT NULL DEFAULT 'analyst'
+                  CHECK (role IN ('admin','analyst','executive')),
+    display_name  VARCHAR(100),
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    last_login    TIMESTAMPTZ
+);
+
+-- Default users (passwords: Admin@1234 / Analyst@1234 / Exec@1234)
+-- Hashes generated with bcrypt rounds=10
+INSERT INTO users (username, password_hash, role, display_name) VALUES
+  ('admin',     '$2b$10$xPVS0SLFABqopxeLLo/Da.uIgFP02UBeJY9j5oSjFfXpvemibFHdG', 'admin',     'Administrator'),
+  ('analyst',   '$2b$10$BO0KL.LZ2VHVyVlcvcWkA.6Gs7mqAudfQ1Jf7SNwf5xM/7MN3QFtu', 'analyst',   'Security Analyst'),
+  ('executive', '$2b$10$WYLNd9d7FJmd/sKq4VMyGeUDzzeLSrJgUkfcrj3.7d7d235i4ezOO', 'executive', 'Executive')
+ON CONFLICT (username) DO NOTHING;

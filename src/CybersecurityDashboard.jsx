@@ -138,7 +138,14 @@ function transformSnapshot(snap) {
 /* ═══════════════════════════════════════════════════════════════════════════
    CONFIG
 ═══════════════════════════════════════════════════════════════════════════ */
-const API = window.location.hostname === "localhost" ? "http://localhost:4000" : "";
+const API = `http://${window.location.hostname}:4000`;
+
+// All API calls include credentials (cookie) for auth
+const apiFetch = (url, opts = {}) => fetch(url, {
+  credentials: "include",
+  ...opts,
+  headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+});
 const VER = "2.0";
 
 const C = {
@@ -1335,11 +1342,82 @@ function AlertsPage({ data }) {
   );
 }
 
+// ── Vulnerability Detail Modal ───────────────────────────────────────────────
+function VulnDetailModal({ vuln, onClose }) {
+  if (!vuln) return null;
+  const FIELDS = [
+    ["QID",         vuln.qid],
+    ["CVE",         vuln.cve || "—"],
+    ["Host",        vuln.host],
+    ["IP Address",  vuln.ip || vuln.host],
+    ["Port",        vuln.port || "—"],
+    ["Type",        vuln.type || "—"],
+    ["Status",      vuln.status],
+    ["Last Found",  vuln.lastFound ? new Date(vuln.lastFound).toLocaleString() : "—"],
+  ];
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:1000,
+      display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}
+      onClick={onClose}>
+      <div style={{ background:"white", borderRadius:14, width:"100%", maxWidth:560,
+        maxHeight:"85vh", overflow:"auto", boxShadow:"0 25px 60px rgba(0,0,0,0.4)" }}
+        onClick={e=>e.stopPropagation()}>
+        {/* Header */}
+        <div style={{ padding:"18px 22px", borderBottom:`3px solid ${SEVERITY_COLORS[vuln.severity]||"#e2e8f0"}`,
+          display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+          <div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+              <SeverityBadge level={vuln.severity}/>
+              {vuln.cve && (
+                <span style={{ fontFamily:"monospace", fontSize:12, fontWeight:700, color:C.primary,
+                  background:`${C.primary}12`, padding:"2px 8px", borderRadius:4 }}>{vuln.cve}</span>
+              )}
+              {!vuln.cve && vuln.qid && (
+                <span style={{ fontFamily:"monospace", fontSize:12, color:C.muted }}>QID {vuln.qid}</span>
+              )}
+            </div>
+            <div style={{ fontSize:15, fontWeight:700, color:C.text, lineHeight:1.4 }}>{vuln.title}</div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:20,
+            cursor:"pointer", color:C.muted, lineHeight:1, flexShrink:0, padding:"2px 4px" }}>✕</button>
+        </div>
+        {/* Details grid */}
+        <div style={{ padding:"16px 22px" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"1px",
+            background:C.border, borderRadius:8, overflow:"hidden", border:`1px solid ${C.border}` }}>
+            {FIELDS.map(([label, val])=>(
+              <div key={label} style={{ padding:"10px 14px", background:"white" }}>
+                <div style={{ fontSize:10, fontWeight:700, color:C.muted, textTransform:"uppercase",
+                  letterSpacing:0.5, marginBottom:3 }}>{label}</div>
+                <div style={{ fontSize:13, fontWeight:600, color:C.text, wordBreak:"break-all" }}>{val}</div>
+              </div>
+            ))}
+          </div>
+          {/* Full title / results */}
+          <div style={{ marginTop:14, padding:"12px 14px", borderRadius:8,
+            background:"#f8fafc", border:`1px solid ${C.border}` }}>
+            <div style={{ fontSize:10, fontWeight:700, color:C.muted, textTransform:"uppercase",
+              letterSpacing:0.5, marginBottom:6 }}>Full Description</div>
+            <div style={{ fontSize:12, color:C.text, lineHeight:1.6, fontFamily:"monospace",
+              whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{vuln.title}</div>
+          </div>
+          <div style={{ marginTop:12, display:"flex", justifyContent:"flex-end" }}>
+            <button onClick={onClose}
+              style={{ padding:"8px 20px", borderRadius:8, border:`1px solid ${C.border}`,
+                background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Vulnerability Deep Dive ──────────────────────────────────────────────────
 function VulnerabilitiesPage({ data }) {
   const d = data || {};
   if (!d._hasData) return <NoData icon="🔍" title="No vulnerability data yet" message="Connect Qualys VMDR in ⚙️ Settings to see live vulnerability scan results." />;
-  const [sort, setSort] = useState("severity");
+  const [sort,    setSort]    = useState("severity");
+  const [selected, setSelected] = useState(null);
   const SEV_ORDER = { Critical:0, High:1, Medium:2, Low:3 };
   const all = d.vulnerabilities || [];
   const vulns = [...all].sort((a,b) => {
@@ -1352,6 +1430,7 @@ function VulnerabilitiesPage({ data }) {
   const pieData = Object.entries(bySev).map(([k,v]) => ({ name:k, value:v, color:SEVERITY_COLORS[k] }));
   return (
     <div>
+      <VulnDetailModal vuln={selected} onClose={()=>setSelected(null)}/>
       <SectionTitle title="Vulnerability Management – Qualys VMDR" subtitle={`${all.length} detections from live scan · sorted by ${sort}`} />
       <div style={{ display:"grid", gridTemplateColumns:"1fr 240px", gap:16, marginBottom:24 }}>
         <Card style={{ padding:20 }}>
@@ -1400,7 +1479,11 @@ function VulnerabilitiesPage({ data }) {
           </tr></thead>
           <tbody>
             {vulns.map((v,i)=>(
-              <tr key={v.id||i} style={{ borderBottom:`1px solid ${C.border}`, background:v.severity==="Critical"?"#fef2f220":"transparent" }}>
+              <tr key={v.id||i} onClick={()=>setSelected(v)}
+                style={{ borderBottom:`1px solid ${C.border}`, background:v.severity==="Critical"?"#fef2f220":"transparent",
+                  cursor:"pointer", transition:"background 0.1s" }}
+                onMouseEnter={e=>e.currentTarget.style.background="#f0f9ff"}
+                onMouseLeave={e=>e.currentTarget.style.background=v.severity==="Critical"?"#fef2f220":"transparent"}>
                 <td style={{ padding:"11px 12px" }}><SeverityBadge level={v.severity}/></td>
                 <td style={{ padding:"11px 12px", fontFamily:"monospace", fontSize:11, fontWeight:700, color:C.primary }}>
                   {v.cve ? <span title={`QID: ${v.qid}`}>{v.cve}</span> : <span style={{color:C.muted}}>QID {v.qid}</span>}
@@ -1694,7 +1777,7 @@ const FIELDS = {
 };
 
 // ── Admin – Integration Status ────────────────────────────────────────────────
-function AdminPage() {
+function AdminPage({ user, onLogout }) {
   const [statuses,    setStatuses]    = useState({});
   const [testing,     setTesting]     = useState(null);
   const [collecting,  setCollecting]  = useState(false);
@@ -1713,7 +1796,7 @@ function AdminPage() {
 
   async function fetchStatuses() {
     try {
-      const r = await fetch(`${API}/api/integrations`);
+      const r = await apiFetch(`${API}/api/integrations`);
       if (!r.ok) {
         const txt = await r.text().catch(() => "");
         const msg = `API returned ${r.status}${txt ? ": " + txt.slice(0, 200) : ""}`;
@@ -1766,7 +1849,7 @@ function AdminPage() {
       fetchStatuses();
       // Trigger data collection immediately after successful test
       if (d.success) {
-        fetch(`${API}/api/collect/${toolKey}`, { method:"POST" }).catch(()=>{});
+        apiFetch(`${API}/api/collect/${toolKey}`, { method:"POST" }).catch(()=>{});
       }
     } catch(e) {
       clearTimeout(timer);
@@ -1783,7 +1866,7 @@ function AdminPage() {
     setCollecting(true);
     setCollectLog("Triggering collection for all configured integrations…");
     try {
-      const r = await fetch(`${API}/api/collect`, { method: "POST" });
+      const r = await apiFetch(`${API}/api/collect`, { method: "POST" });
       const d = await r.json();
       setCollectLog(d.message || "Collection triggered. Data will update in ~30 seconds.");
       showToast("Collection triggered ✅");
@@ -2062,6 +2145,129 @@ function AdminPage() {
           </tbody>
         </table>
       </Card>
+      {/* User management — admin only */}
+      {user?.role === "admin" && <UserManagementSection />}
+    </div>
+  );
+}
+
+/* ── User Management (Admin only) ─────────────────────────────────────── */
+function UserManagementSection() {
+  const [users,   setUsers]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [form,    setForm]    = useState({ username:"", password:"", role:"analyst", display_name:"" });
+  const [saving,  setSaving]  = useState(false);
+  const [msg,     setMsg]     = useState(null);
+
+  async function fetchUsers() {
+    setLoading(true);
+    try {
+      const r = await apiFetch(`${API}/api/auth/users`);
+      if (r.ok) setUsers(await r.json());
+    } catch {}
+    setLoading(false);
+  }
+
+  useEffect(() => { fetchUsers(); }, []);
+
+  async function createUser(e) {
+    e.preventDefault();
+    if (form.password.length < 8) { setMsg({ ok:false, text:"Password must be at least 8 characters" }); return; }
+    setSaving(true); setMsg(null);
+    try {
+      const r = await apiFetch(`${API}/api/auth/users`, {
+        method:"POST", body: JSON.stringify(form),
+      });
+      const d = await r.json();
+      if (!r.ok) setMsg({ ok:false, text: d.error || "Failed" });
+      else {
+        setMsg({ ok:true, text:`User "${form.username}" created` });
+        setForm({ username:"", password:"", role:"analyst", display_name:"" });
+        fetchUsers();
+      }
+    } catch { setMsg({ ok:false, text:"Network error" }); }
+    setSaving(false);
+  }
+
+  async function deleteUser(id, username) {
+    if (!confirm(`Delete user "${username}"?`)) return;
+    await apiFetch(`${API}/api/auth/users/${id}`, { method:"DELETE" });
+    fetchUsers();
+  }
+
+  const inp = { width:"100%", padding:"8px 11px", borderRadius:7, border:`1px solid ${C.border}`, fontSize:13, outline:"none", boxSizing:"border-box" };
+  const ROLE_COLOR = { admin:"#8b5cf6", analyst:"#3b82f6", executive:"#f59e0b" };
+
+  return (
+    <div style={{ marginTop:32 }}>
+      <SectionTitle title="User Management" subtitle="Create and manage user accounts with role-based access" />
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20 }}>
+        {/* User list */}
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:14 }}>
+            Active Users ({users.length})
+          </div>
+          {loading ? <div style={{ color:C.muted, fontSize:13 }}>Loading…</div> : (
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {users.map(u=>(
+                <div key={u.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px",
+                  borderRadius:8, border:`1px solid ${C.border}`, background:"#f8fafc" }}>
+                  <div style={{ width:32, height:32, borderRadius:"50%",
+                    background:ROLE_COLOR[u.role]||"#64748b",
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:13, fontWeight:700, color:"white", flexShrink:0 }}>
+                    {(u.display_name||u.username).charAt(0).toUpperCase()}
+                  </div>
+                  <div style={{ flex:1, overflow:"hidden" }}>
+                    <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{u.display_name||u.username}</div>
+                    <div style={{ fontSize:11, color:C.muted }}>
+                      @{u.username} ·
+                      <span style={{ fontWeight:600, color:ROLE_COLOR[u.role]||C.muted, textTransform:"capitalize" }}> {u.role}</span>
+                    </div>
+                    {u.last_login && (
+                      <div style={{ fontSize:10, color:C.muted }}>Last login: {new Date(u.last_login).toLocaleString()}</div>
+                    )}
+                  </div>
+                  <button onClick={()=>deleteUser(u.id, u.username)}
+                    style={{ padding:"4px 10px", borderRadius:6, border:`1px solid #fecaca`,
+                      background:"white", color:C.critical, fontSize:11, cursor:"pointer" }}>Delete</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+        {/* Create user form */}
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:14 }}>Add New User</div>
+          <form onSubmit={createUser} style={{ display:"flex", flexDirection:"column", gap:12 }}>
+            {[["Username","username","text"],["Display Name","display_name","text"],["Password","password","password"]].map(([l,k,t])=>(
+              <div key={k}>
+                <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>{l}</label>
+                <input type={t} value={form[k]} onChange={e=>setForm(p=>({...p,[k]:e.target.value}))} style={inp} placeholder={k==="password"?"Min 8 characters":""} />
+              </div>
+            ))}
+            <div>
+              <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>Role</label>
+              <select value={form.role} onChange={e=>setForm(p=>({...p,role:e.target.value}))}
+                style={{ ...inp, background:"white" }}>
+                <option value="analyst">Analyst — Security views + Admin</option>
+                <option value="executive">Executive — Board view only</option>
+                <option value="admin">Admin — Full access + User Management</option>
+              </select>
+            </div>
+            {msg && (
+              <div style={{ padding:"8px 12px", borderRadius:7, fontSize:12,
+                background:msg.ok?"#f0fdf4":"#fef2f2", color:msg.ok?C.ok:C.critical,
+                border:`1px solid ${msg.ok?"#bbf7d0":"#fecaca"}` }}>{msg.ok?"✅":"⚠️"} {msg.text}</div>
+            )}
+            <button type="submit" disabled={saving||!form.username||!form.password}
+              style={{ padding:"9px", borderRadius:8, border:"none", background:C.primary,
+                color:"white", fontSize:13, fontWeight:700, cursor:"pointer", opacity:saving?0.6:1 }}>
+              {saving?"Creating…":"➕ Create User"}
+            </button>
+          </form>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -2079,7 +2285,7 @@ function IntegrationsPage({ onSave }) {
 
   async function loadStatuses() {
     try {
-      const r = await fetch(`${API}/api/integrations`);
+      const r = await apiFetch(`${API}/api/integrations`);
       if (r.ok) {
         const arr = await r.json();
         const m = {};
@@ -2098,7 +2304,7 @@ function IntegrationsPage({ onSave }) {
   async function saveIntegration(toolKey, credentials, interval=300) {
     setSaving(true);
     try {
-      const r = await fetch(`${API}/api/integrations/${toolKey}`, {
+      const r = await apiFetch(`${API}/api/integrations/${toolKey}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ credentials, refresh_interval: interval }),
@@ -2166,7 +2372,7 @@ function IntegrationsPage({ onSave }) {
       showToast(data.success ? "Connection successful ✅" : `Test failed: ${data.error}`, data.success);
       loadStatuses();
       if (data.success) {
-        fetch(`${API}/api/collect/${toolKey}`, { method:"POST" }).catch(()=>{});
+        apiFetch(`${API}/api/collect/${toolKey}`, { method:"POST" }).catch(()=>{});
       }
     } catch(e) {
       clearTimeout(timer);
@@ -2181,7 +2387,7 @@ function IntegrationsPage({ onSave }) {
 
   async function deleteIntegration(toolKey) {
     if (!confirm(`Remove all credentials for ${toolKey}?`)) return;
-    await fetch(`${API}/api/integrations/${toolKey}`, { method:"DELETE" });
+    await apiFetch(`${API}/api/integrations/${toolKey}`, { method:"DELETE" });
     setTestResults(prev => { const n={...prev}; delete n[toolKey]; return n; });
     loadStatuses();
     showToast("Credentials removed");
@@ -2424,35 +2630,178 @@ function IntegrationsPage({ onSave }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   MAIN APP
+   LOGIN PAGE
 ═══════════════════════════════════════════════════════════════════════════ */
-export default function CybersecurityDashboard() {
-  const [role, setRole] = useState("executive");
-  const [page, setPage] = useState("overview");
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [dateRange, setDateRange] = useState({ from:"", to:"" });
+function LoginPage({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error,    setError]    = useState("");
+  const [loading,  setLoading]  = useState(false);
 
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoading(true); setError("");
+    try {
+      const r = await fetch(`${API}/api/auth/login`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim().toLowerCase(), password }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setError(d.error || "Login failed"); }
+      else        { onLogin(d); }
+    } catch {
+      setError("Cannot connect to server — is the backend running?");
+    }
+    setLoading(false);
+  }
+
+  const inp = {
+    width:"100%", padding:"10px 14px", borderRadius:8,
+    border:"1.5px solid #e2e8f0", fontSize:14, outline:"none",
+    boxSizing:"border-box", fontFamily:"inherit",
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:"linear-gradient(135deg,#0f172a 0%,#1e3a5f 55%,#0f172a 100%)",
+      fontFamily:"'Inter',-apple-system,sans-serif" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap'); *{box-sizing:border-box;}`}</style>
+
+      <div style={{ display:"flex", gap:64, alignItems:"center", maxWidth:900, width:"100%", padding:24 }}>
+
+        {/* ── Branding panel ── */}
+        <div style={{ flex:1, color:"white" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:28 }}>
+            <div style={{ width:48, height:48, background:"linear-gradient(135deg,#3b82f6,#1d4ed8)",
+              borderRadius:12, display:"flex", alignItems:"center", justifyContent:"center", fontSize:26 }}>🛡️</div>
+            <div>
+              <div style={{ fontSize:19, fontWeight:700 }}>SecOps Command Center</div>
+              <div style={{ fontSize:10, color:"#94a3b8", letterSpacing:1.5, textTransform:"uppercase" }}>Security Operations Dashboard v2.0</div>
+            </div>
+          </div>
+          <h1 style={{ fontSize:34, fontWeight:800, lineHeight:1.2, margin:"0 0 14px 0" }}>
+            Your Security<br/>Operations Hub
+          </h1>
+          <p style={{ color:"#94a3b8", fontSize:14, lineHeight:1.75, margin:"0 0 28px 0" }}>
+            Real-time visibility across Qualys VMDR, Fortinet,<br/>
+            Azure Defender, Taegis XDR and more — all in one place.
+          </p>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {[
+              { role:"executive", icon:"🏢", label:"Executive",  desc:"Board view — Posture, Risk, Cloud, Reports" },
+              { role:"analyst",   icon:"🔬", label:"Analyst",    desc:"Alerts, Vulnerabilities, Firewall, SIEM, Admin" },
+              { role:"admin",     icon:"⚙️", label:"Admin",      desc:"All views + User Management" },
+            ].map(r=>(
+              <div key={r.role} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px",
+                borderRadius:10, background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.08)" }}>
+                <span style={{ fontSize:18 }}>{r.icon}</span>
+                <div>
+                  <div style={{ fontSize:12, fontWeight:700, color:"white" }}>{r.label}</div>
+                  <div style={{ fontSize:11, color:"#64748b" }}>{r.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Login form ── */}
+        <div style={{ width:380, background:"white", borderRadius:16, padding:"36px 32px",
+          boxShadow:"0 25px 60px rgba(0,0,0,0.5)", flexShrink:0 }}>
+          <div style={{ marginBottom:26 }}>
+            <h2 style={{ margin:"0 0 4px 0", fontSize:22, fontWeight:700, color:"#0f172a" }}>Sign in</h2>
+            <p style={{ margin:0, color:"#64748b", fontSize:13 }}>Enter your credentials to continue</p>
+          </div>
+          <form onSubmit={handleLogin} style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <div>
+              <label style={{ display:"block", fontSize:11, fontWeight:700, color:"#374151",
+                marginBottom:5, textTransform:"uppercase", letterSpacing:0.5 }}>Username</label>
+              <input type="text" value={username} onChange={e=>setUsername(e.target.value)}
+                placeholder="admin / analyst / executive" autoFocus style={inp}
+                onFocus={e=>e.target.style.borderColor="#3b82f6"}
+                onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+            </div>
+            <div>
+              <label style={{ display:"block", fontSize:11, fontWeight:700, color:"#374151",
+                marginBottom:5, textTransform:"uppercase", letterSpacing:0.5 }}>Password</label>
+              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+                placeholder="••••••••" style={inp}
+                onFocus={e=>e.target.style.borderColor="#3b82f6"}
+                onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+            </div>
+            {error && (
+              <div style={{ padding:"10px 14px", borderRadius:8, background:"#fef2f2",
+                border:"1px solid #fecaca", color:"#dc2626", fontSize:13 }}>⚠️ {error}</div>
+            )}
+            <button type="submit" disabled={loading||!username||!password}
+              style={{ padding:"11px", borderRadius:8, border:"none",
+                background:"linear-gradient(135deg,#3b82f6,#1d4ed8)", color:"white",
+                fontSize:14, fontWeight:700, cursor:"pointer",
+                opacity:(loading||!username||!password)?0.6:1, marginTop:4 }}>
+              {loading ? "Signing in…" : "Sign In →"}
+            </button>
+          </form>
+          {/* Default credentials */}
+          <div style={{ marginTop:22, padding:"12px 14px", borderRadius:8, background:"#f8fafc", border:"1px solid #e2e8f0" }}>
+            <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", marginBottom:7,
+              textTransform:"uppercase", letterSpacing:0.8 }}>Default Credentials</div>
+            {[["admin","Admin@1234","Full access"],["analyst","Analyst@1234","Analyst + Admin"],["executive","Exec@1234","Board view only"]].map(([u,p,d])=>(
+              <div key={u} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                fontSize:11, padding:"3px 0", borderBottom:"1px solid #f1f5f9" }}>
+                <span><strong style={{color:"#1e293b"}}>{u}</strong>
+                  <span style={{color:"#94a3b8"}}> / </span>
+                  <span style={{color:"#475569",fontFamily:"monospace"}}>{p}</span>
+                </span>
+                <span style={{ fontSize:10, color:"#94a3b8", marginLeft:8 }}>{d}</span>
+              </div>
+            ))}
+            <div style={{ fontSize:10, color:"#cbd5e1", marginTop:6 }}>⚠️ Change passwords after first login.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAIN DASHBOARD  (shown after login)
+═══════════════════════════════════════════════════════════════════════════ */
+function Dashboard({ user, onLogout }) {
+  // Role determines which views are accessible
+  // executive → board only | analyst → analyst+admin | admin → both+admin
+  const isExec  = user.role === "executive";
+  const isAdmin = user.role === "admin";
+
+  const [viewRole, setViewRole] = useState(isExec ? "executive" : "analyst");
+  const [page,     setPage]     = useState(isExec ? "overview" : "alerts");
+  const [data,     setData]     = useState(null);
+  const [loading,  setLoading]  = useState(true);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [dateRange,   setDateRange]   = useState({ from:"", to:"" });
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  // Executive board nav — no Admin
   const execNav = [
     { id:"overview", icon:"🏠", label:"Security Posture" },
     { id:"risk",     icon:"⚠️", label:"Risk & Compliance" },
     { id:"threats",  icon:"🎯", label:"Threat Intelligence" },
     { id:"cloud",    icon:"☁️", label:"Cloud Security" },
     { id:"report",   icon:"📊", label:"Executive Report" },
-    { id:"admin",    icon:"🔌", label:"Admin" },
   ];
+  // Analyst nav — Admin visible here
   const analystNav = [
-    { id:"alerts",     icon:"🚨", label:"Alert Queue" },
-    { id:"vulns",      icon:"🔍", label:"Vulnerabilities" },
-    { id:"firewall",   icon:"🔥", label:"Firewall Analytics" },
-    { id:"surface",    icon:"🌐", label:"Attack Surface" },
-    { id:"assets",     icon:"💻", label:"Assets & Patches" },
-    { id:"cloudanalyst",icon:"☁️",label:"Cloud Security" },
-    { id:"siem",       icon:"📡", label:"SIEM / XDR" },
-    { id:"admin",      icon:"🔌", label:"Admin" },
+    { id:"alerts",      icon:"🚨", label:"Alert Queue" },
+    { id:"vulns",       icon:"🔍", label:"Vulnerabilities" },
+    { id:"firewall",    icon:"🔥", label:"Firewall Analytics" },
+    { id:"surface",     icon:"🌐", label:"Attack Surface" },
+    { id:"assets",      icon:"💻", label:"Assets & Patches" },
+    { id:"cloudanalyst",icon:"☁️", label:"Cloud Security" },
+    { id:"siem",        icon:"📡", label:"SIEM / XDR" },
+    { id:"admin",       icon:"🔌", label:"Admin" },
   ];
-  const nav = role === "executive" ? execNav : analystNav;
+
+  const nav = viewRole === "executive" ? execNav : analystNav;
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -2460,14 +2809,14 @@ export default function CybersecurityDashboard() {
       const params = new URLSearchParams();
       if (dateRange.from) params.append("from", dateRange.from);
       if (dateRange.to)   params.append("to",   dateRange.to);
-      const res = await fetch(`${API}/api/snapshot?${params}`);
+      const res = await apiFetch(`${API}/api/snapshot?${params}`);
+      if (res.status === 401) { onLogout(); return; }
       if (!res.ok) throw new Error("API error");
       const d   = await res.json();
-      const raw = d.data || d;           // per-tool snapshot map
-      setData(transformSnapshot(raw));   // transform to flat structure
+      setData(transformSnapshot(d.data || d));
     } catch (err) {
       console.warn("Snapshot fetch failed:", err.message);
-      setData({});                       // empty — show "no data" states
+      setData({});
     } finally {
       setLoading(false);
       setLastUpdated(new Date());
@@ -2480,26 +2829,37 @@ export default function CybersecurityDashboard() {
     return () => clearInterval(t);
   }, [loadData]);
 
+  // Close user menu on outside click
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const h = () => setShowUserMenu(false);
+    setTimeout(() => document.addEventListener("click", h), 0);
+    return () => document.removeEventListener("click", h);
+  }, [showUserMenu]);
+
   function renderPage() {
     const p = { data, dateRange };
     switch(page) {
-      case "overview": return <OverviewPage {...p}/>;
-      case "risk":     return <RiskCompliancePage {...p}/>;
-      case "threats":  return <ThreatPage {...p}/>;
-      case "cloud":    return <CloudPage {...p}/>;
-      case "report":   return <ReportPage {...p}/>;
-      case "alerts":   return <AlertsPage {...p}/>;
-      case "vulns":    return <VulnerabilitiesPage {...p}/>;
-      case "firewall": return <FirewallPage {...p}/>;
+      case "overview":     return <OverviewPage {...p}/>;
+      case "risk":         return <RiskCompliancePage {...p}/>;
+      case "threats":      return <ThreatPage {...p}/>;
+      case "cloud":        return <CloudPage {...p}/>;
+      case "report":       return <ReportPage {...p}/>;
+      case "alerts":       return <AlertsPage {...p}/>;
+      case "vulns":        return <VulnerabilitiesPage {...p}/>;
+      case "firewall":     return <FirewallPage {...p}/>;
       case "surface":      return <AttackSurfacePage {...p}/>;
       case "assets":       return <AssetsPage {...p}/>;
       case "cloudanalyst": return <CloudAnalystPage {...p}/>;
       case "siem":         return <SIEMPage {...p}/>;
-      case "admin":   return <AdminPage />;
-      case "settings": return <IntegrationsPage onSave={loadData}/>;
-      default:         return <OverviewPage {...p}/>;
+      case "admin":        return <AdminPage user={user} onLogout={onLogout}/>;
+      case "settings":     return <IntegrationsPage onSave={loadData}/>;
+      default:             return <OverviewPage {...p}/>;
     }
   }
+
+  const ROLE_COLOR = { admin:"#8b5cf6", analyst:"#3b82f6", executive:"#f59e0b" };
+  const userColor  = ROLE_COLOR[user.role] || "#64748b";
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100vh",
@@ -2508,28 +2868,37 @@ export default function CybersecurityDashboard() {
 
       {/* ── HEADER ────────────────────────────────────────────────────────── */}
       <header style={{ background:C.header, color:"white", padding:"0 24px", height:60,
-        display:"flex", alignItems:"center", gap:20, zIndex:10, boxShadow:"0 2px 12px rgba(0,0,0,0.25)", flexShrink:0 }}>
+        display:"flex", alignItems:"center", gap:16, zIndex:10,
+        boxShadow:"0 2px 12px rgba(0,0,0,0.25)", flexShrink:0 }}>
 
         {/* Logo */}
         <div style={{ display:"flex", alignItems:"center", gap:10, marginRight:"auto" }}>
-          <div style={{ width:34, height:34, background:"linear-gradient(135deg,#3b82f6,#1d4ed8)", borderRadius:8,
-            display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>🛡️</div>
+          <div style={{ width:34, height:34, background:"linear-gradient(135deg,#3b82f6,#1d4ed8)",
+            borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>🛡️</div>
           <div>
             <div style={{ fontWeight:700, fontSize:15, letterSpacing:0.3 }}>SecOps Command Center</div>
             <div style={{ fontSize:10, color:"#94a3b8", letterSpacing:1.2, textTransform:"uppercase" }}>Security Operations Dashboard • v{VER}</div>
           </div>
         </div>
 
-        {/* Role toggle */}
-        <div style={{ display:"flex", background:"rgba(0,0,0,0.25)", borderRadius:8, padding:3, gap:2 }}>
-          {[["executive","🏢 Executive Board"],["analyst","🔬 Security Analyst"]].map(([r,l])=>(
-            <button key={r} onClick={()=>{ setRole(r); setPage(r==="executive"?"overview":"alerts"); }}
-              style={{ padding:"5px 14px", borderRadius:6, border:"none", cursor:"pointer", fontWeight:600, fontSize:12,
-                background:role===r?"white":"transparent", color:role===r?C.header:"#94a3b8", transition:"all 0.15s" }}>
-              {l}
-            </button>
-          ))}
-        </div>
+        {/* View toggle — hidden for pure executives */}
+        {!isExec && (
+          <div style={{ display:"flex", background:"rgba(0,0,0,0.25)", borderRadius:8, padding:3, gap:2 }}>
+            {[["executive","🏢 Executive Board"],["analyst","🔬 Security Analyst"]].map(([r,l])=>(
+              <button key={r} onClick={()=>{ setViewRole(r); setPage(r==="executive"?"overview":"alerts"); }}
+                style={{ padding:"5px 14px", borderRadius:6, border:"none", cursor:"pointer", fontWeight:600, fontSize:12,
+                  background:viewRole===r?"white":"transparent", color:viewRole===r?C.header:"#94a3b8", transition:"all 0.15s" }}>
+                {l}
+              </button>
+            ))}
+          </div>
+        )}
+        {isExec && (
+          <div style={{ padding:"5px 14px", borderRadius:6, background:"rgba(245,158,11,0.2)",
+            border:"1px solid rgba(245,158,11,0.3)", fontSize:12, fontWeight:600, color:"#fbbf24" }}>
+            🏢 Executive Board
+          </div>
+        )}
 
         {/* Date range */}
         <div style={{ display:"flex", alignItems:"center", gap:8, background:"rgba(255,255,255,0.06)",
@@ -2541,25 +2910,71 @@ export default function CybersecurityDashboard() {
           <input type="date" value={dateRange.to} onChange={e=>setDateRange(p=>({...p,to:e.target.value}))}
             style={{ background:"transparent", border:"none", color:"white", fontSize:12, cursor:"pointer", width:120 }}/>
           {(dateRange.from||dateRange.to)&&(
-            <button onClick={()=>setDateRange({from:"",to:""})} style={{ background:"none", border:"none", color:"#94a3b8", cursor:"pointer", fontSize:14, padding:0 }}>✕</button>
+            <button onClick={()=>setDateRange({from:"",to:""})}
+              style={{ background:"none", border:"none", color:"#94a3b8", cursor:"pointer", fontSize:14, padding:0 }}>✕</button>
           )}
         </div>
 
-        {/* Refresh indicator */}
+        {/* Refresh status */}
         <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"#64748b" }}>
-          <div style={{ width:7, height:7, borderRadius:"50%", background:loading?"#f59e0b":"#10b981",
+          <div style={{ width:7, height:7, borderRadius:"50%",
+            background:loading?"#f59e0b":"#10b981",
             boxShadow:loading?"0 0 0 3px #f59e0b30":"0 0 0 3px #10b98130", transition:"all 0.3s" }}/>
-          {loading?"Refreshing…":lastUpdated?`Updated ${lastUpdated.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`:"-"}
+          {loading?"Refreshing…":lastUpdated?`Updated ${lastUpdated.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`:"-"}
         </div>
 
-        {/* Settings gear */}
-        <button onClick={()=>setPage("settings")}
-          style={{ background:page==="settings"?"rgba(59,130,246,0.25)":"rgba(255,255,255,0.07)",
-            border:`1px solid ${page==="settings"?"#3b82f6":"rgba(255,255,255,0.12)"}`,
-            borderRadius:8, padding:"6px 12px", cursor:"pointer", color:page==="settings"?"#93c5fd":"#94a3b8",
-            fontSize:17, lineHeight:1, transition:"all 0.15s" }}>
-          ⚙️
-        </button>
+        {/* Settings */}
+        {!isExec && (
+          <button onClick={()=>setPage("settings")}
+            style={{ background:page==="settings"?"rgba(59,130,246,0.25)":"rgba(255,255,255,0.07)",
+              border:`1px solid ${page==="settings"?"#3b82f6":"rgba(255,255,255,0.12)"}`,
+              borderRadius:8, padding:"6px 10px", cursor:"pointer",
+              color:page==="settings"?"#93c5fd":"#94a3b8", fontSize:16, transition:"all 0.15s" }}>⚙️</button>
+        )}
+
+        {/* User menu */}
+        <div style={{ position:"relative" }}>
+          <button onClick={e=>{ e.stopPropagation(); setShowUserMenu(v=>!v); }}
+            style={{ display:"flex", alignItems:"center", gap:8, background:"rgba(255,255,255,0.08)",
+              border:"1px solid rgba(255,255,255,0.12)", borderRadius:8,
+              padding:"5px 12px", cursor:"pointer", color:"white" }}>
+            <div style={{ width:24, height:24, borderRadius:"50%", background:userColor,
+              display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700 }}>
+              {(user.display_name||user.username).charAt(0).toUpperCase()}
+            </div>
+            <div style={{ textAlign:"left" }}>
+              <div style={{ fontSize:12, fontWeight:600 }}>{user.display_name || user.username}</div>
+              <div style={{ fontSize:10, color:"#94a3b8", textTransform:"capitalize" }}>{user.role}</div>
+            </div>
+            <span style={{ fontSize:10, color:"#64748b" }}>▼</span>
+          </button>
+          {showUserMenu && (
+            <div style={{ position:"absolute", right:0, top:"calc(100% + 8px)", width:200,
+              background:"white", borderRadius:10, boxShadow:"0 10px 40px rgba(0,0,0,0.3)",
+              border:"1px solid #e2e8f0", overflow:"hidden", zIndex:100 }}
+              onClick={e=>e.stopPropagation()}>
+              <div style={{ padding:"10px 14px", borderBottom:"1px solid #f1f5f9" }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"#0f172a" }}>{user.display_name||user.username}</div>
+                <div style={{ fontSize:11, color:"#64748b", textTransform:"capitalize" }}>{user.role} access</div>
+              </div>
+              <button onClick={()=>{ setPage("change-password"); setShowUserMenu(false); }}
+                style={{ width:"100%", padding:"9px 14px", border:"none", background:"transparent",
+                  textAlign:"left", fontSize:12, color:"#374151", cursor:"pointer" }}>🔒 Change Password</button>
+              {isAdmin && (
+                <button onClick={()=>{ setPage("admin"); setViewRole("analyst"); setShowUserMenu(false); }}
+                  style={{ width:"100%", padding:"9px 14px", border:"none", background:"transparent",
+                    textAlign:"left", fontSize:12, color:"#374151", cursor:"pointer" }}>👥 User Management</button>
+              )}
+              <div style={{ borderTop:"1px solid #f1f5f9" }}>
+                <button onClick={onLogout}
+                  style={{ width:"100%", padding:"9px 14px", border:"none", background:"transparent",
+                    textAlign:"left", fontSize:12, color:"#dc2626", cursor:"pointer", fontWeight:600 }}>
+                  ⟵ Sign Out
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* ── BODY ──────────────────────────────────────────────────────────── */}
@@ -2569,7 +2984,7 @@ export default function CybersecurityDashboard() {
         <aside style={{ width:216, background:C.sidebar, display:"flex", flexDirection:"column", flexShrink:0, overflow:"auto" }}>
           <div style={{ padding:"14px 16px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
             <div style={{ fontSize:9, color:"#334155", textTransform:"uppercase", letterSpacing:1.8, fontWeight:700 }}>
-              {role==="executive"?"Board & Executive":"Security Team"}
+              {viewRole==="executive"?"Board & Executive":"Security Team"}
             </div>
           </div>
           <nav style={{ flex:1, paddingTop:6 }}>
@@ -2583,12 +2998,23 @@ export default function CybersecurityDashboard() {
               </button>
             ))}
           </nav>
-          <div style={{ padding:16, borderTop:"1px solid rgba(255,255,255,0.04)" }}>
-            <div style={{ fontSize:10, color:"#1e3a5f" }}>© 2024 SecOps Platform</div>
+          <div style={{ padding:12, borderTop:"1px solid rgba(255,255,255,0.04)" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px",
+              borderRadius:8, background:"rgba(255,255,255,0.04)" }}>
+              <div style={{ width:26, height:26, borderRadius:"50%", background:userColor,
+                display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"white", flexShrink:0 }}>
+                {(user.display_name||user.username).charAt(0).toUpperCase()}
+              </div>
+              <div style={{ overflow:"hidden" }}>
+                <div style={{ fontSize:11, color:"#94a3b8", fontWeight:600, whiteSpace:"nowrap",
+                  overflow:"hidden", textOverflow:"ellipsis" }}>{user.display_name||user.username}</div>
+                <div style={{ fontSize:9, color:"#475569", textTransform:"capitalize" }}>{user.role}</div>
+              </div>
+            </div>
           </div>
         </aside>
 
-        {/* Main */}
+        {/* Main content */}
         <main style={{ flex:1, overflow:"auto", padding:24 }}>
           {loading && !data ? (
             <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", flexDirection:"column", gap:16 }}>
@@ -2596,6 +3022,8 @@ export default function CybersecurityDashboard() {
                 borderRadius:"50%", animation:"spin 0.8s linear infinite" }}/>
               <div style={{ color:C.muted, fontSize:14 }}>Loading security data…</div>
             </div>
+          ) : page === "change-password" ? (
+            <ChangePasswordPage onBack={()=>setPage(viewRole==="executive"?"overview":"alerts")} />
           ) : renderPage()}
         </main>
       </div>
@@ -2619,4 +3047,93 @@ export default function CybersecurityDashboard() {
       `}</style>
     </div>
   );
+}
+
+/* ── Change Password Page ───────────────────────────────────────────────── */
+function ChangePasswordPage({ onBack }) {
+  const [form,    setForm]    = useState({ current:"", next:"", confirm:"" });
+  const [msg,     setMsg]     = useState(null);
+  const [saving,  setSaving]  = useState(false);
+
+  async function handleSave(e) {
+    e.preventDefault();
+    if (form.next !== form.confirm) { setMsg({ ok:false, text:"Passwords do not match" }); return; }
+    if (form.next.length < 8)       { setMsg({ ok:false, text:"Password must be at least 8 characters" }); return; }
+    setSaving(true); setMsg(null);
+    try {
+      const r = await apiFetch(`${API}/api/auth/change-password`, {
+        method:"POST",
+        body: JSON.stringify({ current_password: form.current, new_password: form.next }),
+      });
+      const d = await r.json();
+      if (!r.ok) setMsg({ ok:false, text: d.error || "Failed" });
+      else       { setMsg({ ok:true, text:"Password changed successfully!" }); setForm({ current:"", next:"", confirm:"" }); }
+    } catch { setMsg({ ok:false, text:"Network error" }); }
+    setSaving(false);
+  }
+
+  const inp = { width:"100%", padding:"9px 12px", borderRadius:8, border:"1.5px solid #e2e8f0", fontSize:13, outline:"none", boxSizing:"border-box" };
+  return (
+    <div>
+      <SectionTitle title="Change Password" subtitle="Update your account password" />
+      <Card style={{ maxWidth:420, padding:28 }}>
+        <form onSubmit={handleSave} style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {[["current","Current Password"],["next","New Password"],["confirm","Confirm New Password"]].map(([k,l])=>(
+            <div key={k}>
+              <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:5, textTransform:"uppercase", letterSpacing:0.5 }}>{l}</label>
+              <input type="password" value={form[k]} onChange={e=>setForm(p=>({...p,[k]:e.target.value}))} style={inp}/>
+            </div>
+          ))}
+          {msg && (
+            <div style={{ padding:"10px 12px", borderRadius:8, fontSize:13,
+              background:msg.ok?"#f0fdf4":"#fef2f2", color:msg.ok?C.ok:C.critical,
+              border:`1px solid ${msg.ok?"#bbf7d0":"#fecaca"}` }}>{msg.ok?"✅":"⚠️"} {msg.text}</div>
+          )}
+          <div style={{ display:"flex", gap:8, marginTop:4 }}>
+            <button type="button" onClick={onBack}
+              style={{ flex:1, padding:"9px", borderRadius:8, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>Cancel</button>
+            <button type="submit" disabled={saving||!form.current||!form.next||!form.confirm}
+              style={{ flex:2, padding:"9px", borderRadius:8, border:"none", background:C.primary, color:"white", fontSize:13, fontWeight:700, cursor:"pointer", opacity:saving?0.6:1 }}>
+              {saving?"Saving…":"Save Password"}
+            </button>
+          </div>
+        </form>
+      </Card>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   APP ROOT  (auth gate)
+═══════════════════════════════════════════════════════════════════════════ */
+export default function App() {
+  const [user,     setUser]     = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API}/api/auth/me`, { credentials:"include" })
+      .then(r => r.ok ? r.json() : null)
+      .then(u => { setUser(u); setChecking(false); })
+      .catch(() => setChecking(false));
+  }, []);
+
+  async function handleLogout() {
+    await fetch(`${API}/api/auth/logout`, { method:"POST", credentials:"include" }).catch(()=>{});
+    setUser(null);
+  }
+
+  if (checking) return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:"#0f172a", fontFamily:"'Inter',sans-serif" }}>
+      <div style={{ textAlign:"center", color:"white" }}>
+        <div style={{ width:40, height:40, border:"3px solid #3b82f6", borderTopColor:"transparent",
+          borderRadius:"50%", animation:"spin 0.8s linear infinite", margin:"0 auto 16px" }}/>
+        <div style={{ color:"#64748b", fontSize:13 }}>Checking session…</div>
+      </div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+
+  if (!user) return <LoginPage onLogin={setUser} />;
+  return <Dashboard user={user} onLogout={handleLogout} />;
 }

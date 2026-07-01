@@ -4,12 +4,32 @@ const { Pool }   = require("pg");
 const cron       = require("node-cron");
 const axios      = require("axios");
 const https      = require("https");
+const bcrypt     = require("bcryptjs");
+const jwt        = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
+
+const JWT_SECRET  = process.env.JWT_SECRET || "secops-jwt-secret-change-in-prod";
+const JWT_EXPIRES = "10h";
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
+
+/* ── Auth helpers ───────────────────────────────────────────────────────── */
+function requireAuth(req, res, next) {
+  const token = req.cookies?.session || req.headers.authorization?.replace("Bearer ", "");
+  if (!token) return res.status(401).json({ error: "Authentication required" });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.clearCookie("session");
+    res.status(401).json({ error: "Session expired — please log in again" });
+  }
+}
 
 /* ── DB pool ────────────────────────────────────────────────────────────── */
 const pool = new Pool({
@@ -388,8 +408,108 @@ async function scheduleCollectors() {
 // Health
 app.get("/api/health", (_, res) => res.json({ status:"ok", ts: new Date() }));
 
+/* ── Auth routes ─────────────────────────────────────────────────────────── */
+app.post("/api/auth/login", async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password)
+    return res.status(400).json({ error: "Username and password required" });
+  try {
+    const r = await pool.query(
+      "SELECT id, username, password_hash, role, display_name FROM users WHERE username=$1",
+      [username.toLowerCase().trim()]
+    );
+    const u = r.rows[0];
+    if (!u) return res.status(401).json({ error: "Invalid username or password" });
+    const valid = await bcrypt.compare(password, u.password_hash);
+    if (!valid) return res.status(401).json({ error: "Invalid username or password" });
+    // Update last_login
+    pool.query("UPDATE users SET last_login=NOW() WHERE id=$1", [u.id]).catch(() => {});
+    const token = jwt.sign(
+      { id: u.id, username: u.username, role: u.role, display_name: u.display_name },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES }
+    );
+    res.cookie("session", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 10 * 60 * 60 * 1000, // 10h
+      path: "/",
+    });
+    res.json({ username: u.username, role: u.role, display_name: u.display_name });
+  } catch(e) {
+    console.error("Login error:", e.message);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
+
+app.get("/api/auth/me", requireAuth, (req, res) => {
+  res.json({ username: req.user.username, role: req.user.role, display_name: req.user.display_name });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  res.clearCookie("session", { path: "/" });
+  res.json({ ok: true });
+});
+
+// Change own password
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+  const { current_password, new_password } = req.body || {};
+  if (!current_password || !new_password)
+    return res.status(400).json({ error: "Both current and new password required" });
+  if (new_password.length < 8)
+    return res.status(400).json({ error: "New password must be at least 8 characters" });
+  try {
+    const r = await pool.query("SELECT password_hash FROM users WHERE id=$1", [req.user.id]);
+    if (!r.rows.length) return res.status(404).json({ error: "User not found" });
+    const valid = await bcrypt.compare(current_password, r.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: "Current password incorrect" });
+    const hash = await bcrypt.hash(new_password, 10);
+    await pool.query("UPDATE users SET password_hash=$1 WHERE id=$2", [hash, req.user.id]);
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// List users (admin only)
+app.get("/api/auth/users", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only" });
+  const r = await pool.query(
+    "SELECT id, username, role, display_name, created_at, last_login FROM users ORDER BY username"
+  );
+  res.json(r.rows);
+});
+
+// Create user (admin only)
+app.post("/api/auth/users", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only" });
+  const { username, password, role, display_name } = req.body || {};
+  if (!username || !password || !role) return res.status(400).json({ error: "username, password, role required" });
+  if (!["admin","analyst","executive"].includes(role)) return res.status(400).json({ error: "Invalid role" });
+  if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const r = await pool.query(
+      "INSERT INTO users (username, password_hash, role, display_name) VALUES ($1,$2,$3,$4) RETURNING id, username, role, display_name",
+      [username.toLowerCase().trim(), hash, role, display_name || username]
+    );
+    res.json(r.rows[0]);
+  } catch(e) {
+    if (e.code === "23505") return res.status(409).json({ error: "Username already exists" });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete user (admin only)
+app.delete("/api/auth/users/:id", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only" });
+  if (req.params.id === req.user.id) return res.status(400).json({ error: "Cannot delete your own account" });
+  await pool.query("DELETE FROM users WHERE id=$1", [req.params.id]);
+  res.json({ ok: true });
+});
+
 // Get all integration statuses — returns safe display info only (no secrets)
-app.get("/api/integrations", async (_, res) => {
+app.get("/api/integrations", requireAuth, async (req, res) => {
   try {
     const r = await pool.query(
       "SELECT tool_name, enabled, status, last_tested, last_error, refresh_interval, updated_at, credentials FROM integrations ORDER BY tool_name"
@@ -422,7 +542,7 @@ app.get("/api/integrations", async (_, res) => {
 });
 
 // Save credentials
-app.post("/api/integrations/:tool", async (req, res) => {
+app.post("/api/integrations/:tool", requireAuth, async (req, res) => {
   const { tool } = req.params;
   const { credentials, refresh_interval } = req.body;
   try {
@@ -440,7 +560,7 @@ app.post("/api/integrations/:tool", async (req, res) => {
 });
 
 // Test connection (returns sample data for preview)
-app.post("/api/integrations/:tool/test", async (req, res) => {
+app.post("/api/integrations/:tool/test", requireAuth, async (req, res) => {
   const { tool } = req.params;
   const { instance } = req.query; // optional instance index for multi-instance tools
   const instanceIdx = instance !== undefined ? parseInt(instance) : null;
@@ -520,7 +640,7 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
 });
 
 // Delete credentials
-app.delete("/api/integrations/:tool", async (req, res) => {
+app.delete("/api/integrations/:tool", requireAuth, async (req, res) => {
   try {
     await pool.query(
       "UPDATE integrations SET credentials='{}', status='unconfigured', last_error=NULL WHERE tool_name=$1",
@@ -531,7 +651,7 @@ app.delete("/api/integrations/:tool", async (req, res) => {
 });
 
 // Latest snapshot per tool (optionally filtered by date range)
-app.get("/api/snapshot", async (req, res) => {
+app.get("/api/snapshot", requireAuth, async (req, res) => {
   const { from, to } = req.query;
   try {
     let query, params;
@@ -554,7 +674,7 @@ app.get("/api/snapshot", async (req, res) => {
 });
 
 // Historical snapshots for a tool
-app.get("/api/snapshots/:tool", async (req, res) => {
+app.get("/api/snapshots/:tool", requireAuth, async (req, res) => {
   const { tool } = req.params;
   const { from, to, limit=100 } = req.query;
   try {
@@ -569,7 +689,7 @@ app.get("/api/snapshots/:tool", async (req, res) => {
 });
 
 // KPI trend data
-app.get("/api/kpis", async (req, res) => {
+app.get("/api/kpis", requireAuth, async (req, res) => {
   const { days=30 } = req.query;
   try {
     const r = await pool.query(
@@ -582,7 +702,7 @@ app.get("/api/kpis", async (req, res) => {
 });
 
 // Collect a single tool on demand
-app.post("/api/collect/:tool", async (req, res) => {
+app.post("/api/collect/:tool", requireAuth, async (req, res) => {
   const { tool } = req.params;
   const collectors = {
     fortinet: collectFortinet, paloalto: collectPaloAlto, upguard: collectUpGuard,
@@ -595,7 +715,7 @@ app.post("/api/collect/:tool", async (req, res) => {
 });
 
 // Manual collection trigger
-app.post("/api/collect", async (_, res) => {
+app.post("/api/collect", requireAuth, async (req, res) => {
   res.json({ ok: true, message: "Collection triggered" });
   Promise.all([
     collectFortinet(), collectPaloAlto(), collectUpGuard(),
