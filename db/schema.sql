@@ -201,3 +201,22 @@ CREATE OR REPLACE VIEW vuln_aging AS
         severity, COUNT(*) AS count
     FROM vulnerabilities WHERE status = 'Open'
     GROUP BY age_bucket, severity ORDER BY age_bucket;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Integration credentials (stored server-side, never in browser)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS integrations (
+  tool_name   VARCHAR(50)  PRIMARY KEY,
+  credentials JSONB        NOT NULL DEFAULT '{}',
+  enabled     BOOLEAN      DEFAULT true,
+  status      VARCHAR(20)  DEFAULT 'unconfigured',  -- unconfigured | ok | error
+  last_tested TIMESTAMPTZ,
+  last_error  TEXT,
+  updated_at  TIMESTAMPTZ  DEFAULT NOW()
+);
+
+-- Seed rows so every tool always has a row
+INSERT INTO integrations (tool_name) VALUES
+  ('fortinet'), ('paloalto'), ('upguard'), ('azure'),
+  ('qualys'), ('manageengine'), ('taegis')
+ON CONFLICT DO NOTHING;

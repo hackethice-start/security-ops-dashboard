@@ -1074,48 +1074,62 @@ const INTEGRATIONS_DEF = [
   },
 ];
 
-function StatusBadge({ configured, tested }) {
+function StatusBadge({ configured, tested, dbStatus }) {
   if (!configured) return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Not Configured</span>;
-  if (tested === "ok")    return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✓ Connected</span>;
-  if (tested === "error") return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">✗ Error</span>;
-  return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">Configured</span>;
+  if (tested === "ok" || dbStatus === "ok")    return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✓ Connected</span>;
+  if (tested === "error" || dbStatus === "error") return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">✗ Error</span>;
+  return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">⚙ Configured</span>;
 }
 
-function IntegrationCard({ def, saved, onUpdate }) {
+const API = process.env.REACT_APP_API_BASE_URL || "http://localhost:4000";
+
+function IntegrationCard({ def, status, onUpdate }) {
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState(() => {
     const v = {};
-    def.fields.forEach(f => { v[f.id] = saved[f.id] || ""; });
+    def.fields.forEach(f => { v[f.id] = ""; });
     return v;
   });
-  const [testState, setTestState] = useState(null); // null | "testing" | "ok" | "error"
+  const [testState, setTestState] = useState(null);
   const [saveMsg, setSaveMsg] = useState("");
+  const configured = status?.configured || false;
 
-  const configured = def.fields.some(f => values[f.id]);
+  // Map flat field IDs to nested credential object
+  function buildCreds() {
+    const creds = {};
+    def.fields.forEach(f => { if (values[f.id]) creds[f.id] = values[f.id]; });
+    return creds;
+  }
 
-  function handleSave() {
-    const current = JSON.parse(localStorage.getItem("secops_integrations") || "{}");
-    def.fields.forEach(f => { current[f.id] = values[f.id]; });
-    localStorage.setItem("secops_integrations", JSON.stringify(current));
-    onUpdate();
-    setSaveMsg("Saved!");
-    setTimeout(() => setSaveMsg(""), 2000);
+  async function handleSave() {
+    setSaveMsg("Saving…");
+    try {
+      const r = await fetch(`${API}/api/integrations/${def.key}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildCreds()),
+      });
+      if (r.ok) { setSaveMsg("✓ Saved!"); onUpdate(); setOpen(false); }
+      else setSaveMsg("Error saving");
+    } catch { setSaveMsg("Error saving"); }
+    setTimeout(() => setSaveMsg(""), 3000);
   }
 
   async function handleTest() {
     setTestState("testing");
     try {
-      // Simple connectivity test — just check host reachable for URL-based tools
-      const hostField = def.fields.find(f => f.id.endsWith("_host"));
-      if (hostField && values[hostField.id]) {
-        await fetch(values[hostField.id] + "/api/v2/health", { mode: "no-cors", signal: AbortSignal.timeout(5000) });
-      }
-      // For API-key-only tools, just validate the key is non-empty
-      setTestState("ok");
-    } catch {
-      setTestState("error");
-    }
-    setTimeout(() => setTestState(null), 5000);
+      const r = await fetch(`${API}/api/integrations/${def.key}/test`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildCreds()),
+      });
+      const j = await r.json();
+      setTestState(j.ok ? "ok" : "error");
+    } catch { setTestState("error"); }
+    setTimeout(() => setTestState(null), 6000);
+  }
+
+  async function handleClear() {
+    await fetch(`${API}/api/integrations/${def.key}`, { method: "DELETE" });
+    onUpdate();
   }
 
   return (
@@ -1129,55 +1143,46 @@ function IntegrationCard({ def, saved, onUpdate }) {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <StatusBadge configured={configured} tested={testState} />
+          <StatusBadge configured={configured} tested={testState} dbStatus={status?.status} />
+          {configured && <button onClick={e=>{e.stopPropagation();handleClear();}} className="text-xs text-red-400 hover:text-red-600">Remove</button>}
           <span className="text-gray-400 text-sm">{open ? "▲" : "▼"}</span>
         </div>
       </div>
 
       {open && (
         <div className="px-5 pb-5 border-t border-gray-100 pt-4">
+          {configured && <div className="mb-3 text-xs text-green-700 bg-green-50 rounded-lg px-3 py-2">✓ Credentials saved in database. Enter new values below to update.</div>}
           <div className="grid grid-cols-1 gap-3 mb-4">
             {def.fields.map(field => (
               <div key={field.id}>
                 <label className="block text-xs font-semibold text-gray-600 mb-1">{field.label}</label>
                 {field.type === "select" ? (
-                  <select
-                    value={values[field.id]}
-                    onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
-                  >
+                  <select value={values[field.id]} onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
                     {(field.options || []).map(o => <option key={o} value={o}>{o}</option>)}
                   </select>
                 ) : (
-                  <input
-                    type={field.type}
-                    value={values[field.id]}
+                  <input type={field.type} value={values[field.id]}
                     onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
-                    placeholder={field.placeholder}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono"
-                  />
+                    placeholder={configured ? "••••••• (saved — enter new value to update)" : field.placeholder}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono" />
                 )}
                 {field.hint && <p className="text-xs text-gray-400 mt-1">💡 {field.hint}</p>}
               </div>
             ))}
           </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleSave}
-              className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              {saveMsg || "Save Credentials"}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={handleSave} className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
+              {saveMsg || "Save to Database"}
             </button>
-            <button
-              onClick={handleTest}
-              disabled={!configured || testState === "testing"}
-              className="px-4 py-2 border border-gray-300 text-gray-600 text-sm font-semibold rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40"
-            >
-              {testState === "testing" ? "Testing…" : testState === "ok" ? "✓ OK" : testState === "error" ? "✗ Failed" : "Test Connection"}
+            <button onClick={handleTest} disabled={testState === "testing"}
+              className="px-4 py-2 border border-gray-300 text-gray-600 text-sm font-semibold rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40">
+              {testState === "testing" ? "Testing…" : testState === "ok" ? "✓ Connected" : testState === "error" ? "✗ Failed" : "Test Connection"}
             </button>
+            {status?.last_error && <span className="text-xs text-red-500">Last error: {status.last_error}</span>}
             <a href={def.docs} target="_blank" rel="noreferrer" className="text-xs text-blue-500 hover:underline ml-auto">📖 API Docs</a>
           </div>
+          {status?.last_tested && <p className="text-xs text-gray-400 mt-2">Last tested: {new Date(status.last_tested).toLocaleString()}</p>}
         </div>
       )}
     </div>
@@ -1185,69 +1190,75 @@ function IntegrationCard({ def, saved, onUpdate }) {
 }
 
 function IntegrationsPage({ onSave }) {
-  const [saved, setSaved] = useState(() => JSON.parse(localStorage.getItem("secops_integrations") || "{}"));
-  const [showClear, setShowClear] = useState(false);
+  const [statuses, setStatuses] = useState({});
+  const [loading, setLoading] = useState(true);
 
-  function handleUpdate() {
-    setSaved(JSON.parse(localStorage.getItem("secops_integrations") || "{}"));
-    onSave();
+  async function loadStatuses() {
+    try {
+      const r = await fetch(`${API}/api/integrations`);
+      const rows = await r.json();
+      const map = {};
+      rows.forEach(row => { map[row.tool_name] = row; });
+      setStatuses(map);
+    } catch { /* backend not yet ready */ }
+    setLoading(false);
   }
 
-  const configuredCount = INTEGRATIONS_DEF.filter(d => d.fields.some(f => saved[f.id])).length;
+  useEffect(() => { loadStatuses(); }, []);
+
+  function handleUpdate() { loadStatuses(); onSave(); }
+
+  const configuredCount = Object.values(statuses).filter(s => s.configured).length;
 
   return (
     <div className="max-w-3xl mx-auto space-y-4 pb-8">
-      {/* Header */}
-      <div className="bg-white rounded-xl shadow-sm p-5 flex items-start justify-between">
-        <div>
-          <h2 className="text-lg font-bold text-gray-800">Integrations</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            Connect your security tools to pull live data into the dashboard.
-            Credentials are stored locally in your browser.
-          </p>
-          <div className="flex gap-3 mt-3">
-            <span className="text-sm font-semibold text-blue-600">{configuredCount} / {INTEGRATIONS_DEF.length} configured</span>
-            {configuredCount === 0 && <span className="text-sm text-yellow-600">🟡 Running in demo mode</span>}
-            {configuredCount > 0 && <span className="text-sm text-green-600">🟢 Live data active</span>}
+      <div className="bg-white rounded-xl shadow-sm p-5">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-lg font-bold text-gray-800">Integrations</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Connect your security tools. Credentials are stored securely in the database and never sent to the browser.
+              Data refreshes every <strong>5 minutes</strong> automatically.
+            </p>
+            <div className="flex gap-3 mt-3 flex-wrap">
+              <span className="text-sm font-semibold text-blue-600">{configuredCount} / {INTEGRATIONS_DEF.length} configured</span>
+              {configuredCount === 0 && <span className="text-sm text-yellow-600">🟡 Demo mode</span>}
+              {configuredCount > 0 && <span className="text-sm text-green-600">🟢 Live data active</span>}
+            </div>
           </div>
+          <button onClick={handleUpdate} className="text-xs text-blue-500 hover:text-blue-700 px-3 py-1.5 border border-blue-200 rounded-lg">↻ Refresh Status</button>
         </div>
-        <button
-          onClick={() => setShowClear(v => !v)}
-          className="text-xs text-red-400 hover:text-red-600"
-        >
-          Clear all
-        </button>
       </div>
 
-      {showClear && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center justify-between">
-          <span className="text-sm text-red-700">This will remove all saved credentials from your browser.</span>
-          <button
-            onClick={() => { localStorage.removeItem("secops_integrations"); setSaved({}); onSave(); setShowClear(false); }}
-            className="px-3 py-1.5 bg-red-600 text-white text-xs font-semibold rounded-lg hover:bg-red-700"
-          >
-            Confirm Clear
-          </button>
-        </div>
-      )}
-
-      {/* Quick-start guide */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
         <h3 className="text-sm font-bold text-blue-800 mb-2">⚡ Quick Start</h3>
         <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
-          <li>Click on any integration card below to expand it</li>
-          <li>Enter your API credentials (they stay in your browser only)</li>
-          <li>Click <strong>Save Credentials</strong> — the dashboard refreshes automatically</li>
-          <li>Use <strong>Test Connection</strong> to verify before saving</li>
+          <li>Click any integration card below to expand it</li>
+          <li>Enter your API credentials and click <strong>Save to Database</strong></li>
+          <li>Click <strong>Test Connection</strong> to verify — the backend fetches real data immediately</li>
+          <li>Dashboard auto-refreshes every 5 minutes with live data</li>
         </ol>
       </div>
 
-      {/* Integration cards */}
-      {INTEGRATIONS_DEF.map(def => (
-        <IntegrationCard key={def.key} def={def} saved={saved} onUpdate={handleUpdate} />
-      ))}
+      {loading ? (
+        <div className="text-center text-gray-400 py-8">Loading integration status…</div>
+      ) : (
+        INTEGRATIONS_DEF.map(def => (
+          <IntegrationCard key={def.key} def={def} status={statuses[def.key]} onUpdate={handleUpdate} />
+        ))
+      )}
     </div>
   );
+}
+
+// Fetch all live data from backend snapshot endpoint
+async function fetchLiveData() {
+  try {
+    const API_URL = process.env.REACT_APP_API_BASE_URL || "http://localhost:4000";
+    const r = await fetch(`${API_URL}/api/snapshot`, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
 }
 
 export default function CybersecurityDashboard() {
@@ -1258,13 +1269,24 @@ export default function CybersecurityDashboard() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const d = await loadAllData();
-    setData(d);
-    setLastRefresh(new Date());
+    try {
+      const live = await fetchLiveData();
+      if (live && Object.keys(live).some(k => live[k])) {
+        const base = await loadAllData();
+        setData({ ...base, ...Object.fromEntries(Object.entries(live).filter(([,v]) => v)) });
+      } else {
+        setData(await loadAllData());
+      }
+      setLastRefresh(new Date());
+    } catch { setData(await loadAllData()); }
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 5 * 60 * 1000); // auto-refresh every 5 min
+    return () => clearInterval(id);
+  }, [load]);
 
   if (loading) {
     return (
