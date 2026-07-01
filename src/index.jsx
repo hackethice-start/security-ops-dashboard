@@ -1,7 +1,9 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import './index.css';
 import CybersecurityDashboard from './CybersecurityDashboard';
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<React.StrictMode><CybersecurityDashboard /></React.StrictMode>);
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <CybersecurityDashboard />
+  </React.StrictMode>
+);

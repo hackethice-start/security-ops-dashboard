@@ -1,9 +1,7 @@
-name: Deploy Security Ops Dashboard
+name: Deploy - Security Ops Dashboard
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
 
 jobs:
@@ -12,91 +10,64 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      - name: Checkout code
+      - name: Checkout latest code
         uses: actions/checkout@v4
 
-      - name: Install docker compose if missing
-        run: |
-          if docker compose version &>/dev/null 2>&1; then
-            echo "docker compose (plugin) found"
-            echo "COMPOSE_CMD=docker compose" >> $GITHUB_ENV
-          elif command -v docker-compose &>/dev/null 2>&1; then
-            echo "docker-compose (v1) found"
-            echo "COMPOSE_CMD=docker-compose" >> $GITHUB_ENV
-          else
-            echo "Installing docker-compose..."
-            sudo curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
-            sudo chmod +x /usr/local/bin/docker-compose
-            echo "COMPOSE_CMD=docker-compose" >> $GITHUB_ENV
-          fi
-
       - name: Write .env file
-        env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
-          FORTINET_HOST: ${{ secrets.FORTINET_HOST }}
-          FORTINET_APIKEY: ${{ secrets.FORTINET_APIKEY }}
-          PALOALTO_HOST: ${{ secrets.PALOALTO_HOST }}
-          PALOALTO_APIKEY: ${{ secrets.PALOALTO_APIKEY }}
-          UPGUARD_APIKEY: ${{ secrets.UPGUARD_APIKEY }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          QUALYS_USERNAME: ${{ secrets.QUALYS_USERNAME }}
-          QUALYS_PASSWORD: ${{ secrets.QUALYS_PASSWORD }}
-          ME_HOST: ${{ secrets.ME_HOST }}
-          ME_APIKEY: ${{ secrets.ME_APIKEY }}
         run: |
-          mkdir -p /opt/secops
-          {
-            echo "DASHBOARD_PORT=3000"
-            echo "POSTGRES_DB=secops"
-            echo "POSTGRES_USER=secops"
-            echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
-            echo "REACT_APP_FORTINET_HOST=${FORTINET_HOST}"
-            echo "REACT_APP_FORTINET_APIKEY=${FORTINET_APIKEY}"
-            echo "REACT_APP_PALOALTO_HOST=${PALOALTO_HOST}"
-            echo "REACT_APP_PALOALTO_APIKEY=${PALOALTO_APIKEY}"
-            echo "REACT_APP_UPGUARD_APIKEY=${UPGUARD_APIKEY}"
-            echo "REACT_APP_AZURE_TENANT_ID=${AZURE_TENANT_ID}"
-            echo "REACT_APP_AZURE_CLIENT_ID=${AZURE_CLIENT_ID}"
-            echo "REACT_APP_AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}"
-            echo "REACT_APP_AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}"
-            echo "REACT_APP_QUALYS_USERNAME=${QUALYS_USERNAME}"
-            echo "REACT_APP_QUALYS_PASSWORD=${QUALYS_PASSWORD}"
-            echo "REACT_APP_ME_HOST=${ME_HOST}"
-            echo "REACT_APP_ME_APIKEY=${ME_APIKEY}"
-            echo "REACT_APP_API_BASE_URL=http://192.168.101.10:4000"
-          } > /opt/secops/.env
+          printf 'POSTGRES_DB=secops\n' > $GITHUB_WORKSPACE/.env
+          printf 'POSTGRES_USER=secops\n' >> $GITHUB_WORKSPACE/.env
+          printf 'POSTGRES_PASSWORD=%s\n' '${{ secrets.POSTGRES_PASSWORD }}' >> $GITHUB_WORKSPACE/.env
+          printf 'POSTGRES_HOST=db\n' >> $GITHUB_WORKSPACE/.env
+          printf 'POSTGRES_PORT=5432\n' >> $GITHUB_WORKSPACE/.env
+          printf 'NODE_ENV=production\n' >> $GITHUB_WORKSPACE/.env
+          printf 'PORT=4000\n' >> $GITHUB_WORKSPACE/.env
+          echo ".env written"
 
-      - name: Copy project files to deploy dir
+      - name: Ensure Docker Compose is available
         run: |
-          cp docker-compose.yml /opt/secops/docker-compose.yml
-          cp Dockerfile /opt/secops/Dockerfile
-          cp nginx.conf /opt/secops/nginx.conf
-          cp index.html /opt/secops/index.html
-          cp package.json /opt/secops/package.json
-          cp vite.config.js /opt/secops/vite.config.js
-          cp tailwind.config.js /opt/secops/tailwind.config.js
-          cp postcss.config.js /opt/secops/postcss.config.js
-          cp -r src /opt/secops/src
-          cp -r public /opt/secops/public
-          cp -r backend /opt/secops/backend
-          mkdir -p /opt/secops/db
-          cp db/schema.sql /opt/secops/db/schema.sql
+          docker compose version 2>/dev/null && exit 0
+          echo "Installing docker-compose-plugin..."
+          apt-get update -qq && apt-get install -y docker-compose-plugin 2>/dev/null || true
+          docker compose version
 
-      - name: Build and start stack
-        working-directory: /opt/secops
+      - name: Stop existing containers
+        working-directory: ${{ github.workspace }}
+        run: docker compose down --remove-orphans || true
+
+      - name: Build fresh images (no cache)
+        working-directory: ${{ github.workspace }}
+        run: docker compose build --no-cache
+
+      - name: Start stack
+        working-directory: ${{ github.workspace }}
+        run: docker compose up --detach
+
+      - name: Wait for services to start
+        run: sleep 30
+
+      - name: Health check - Dashboard
         run: |
-          ${COMPOSE_CMD} down --remove-orphans || true
-          ${COMPOSE_CMD} up --detach --build
-          ${COMPOSE_CMD} ps
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ --max-time 15)
+          echo "Dashboard HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "FAILED - dashboard logs:"
+            docker compose -f $GITHUB_WORKSPACE/docker-compose.yml logs dashboard
+            exit 1
+          fi
+          echo "Dashboard OK"
 
-      - name: Clean up old images
-        run: docker image prune --force
-
-      - name: Health check
+      - name: Health check - Backend API
         run: |
-          sleep 30
-          curl -sf http://localhost:3000/ && echo "Dashboard OK" || echo "Dashboard not ready yet"
-          curl -sf http://localhost:4000/api/health && echo "Backend OK" || echo "Backend not ready yet"
+          RESP=$(curl -s http://localhost:4000/api/health --max-time 10)
+          echo "Backend response: $RESP"
+          echo "$RESP" | grep -q '"status":"ok"' || {
+            echo "FAILED - backend logs:"
+            docker compose -f $GITHUB_WORKSPACE/docker-compose.yml logs backend
+            exit 1
+          }
+          echo "Backend OK"
+
+      - name: Show running containers
+        if: always()
+     

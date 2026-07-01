@@ -1,1363 +1,1459 @@
-/**
- * CybersecurityDashboard.jsx
- * ──────────────────────────────────────────────────────────────────────────────
- * Integrated dashboard for:
- *  • Fortinet FortiGate      – Network firewall telemetry
- *  • Palo Alto (Panorama)    – Firewall threats & policy hits
- *  • UpGuard                 – External attack surface
- *  • Azure Defender for Cloud – Cloud security score & alerts
- *  • Qualys                  – VAPT vulnerability data
- *  • ManageEngine (ME)       – Asset, patch & endpoint encryption
- * ──────────────────────────────────────────────────────────────────────────────
- * CONFIGURATION  →  edit the CONFIG block below, then set the same keys
- *                   in your .env file (REACT_APP_* prefix for CRA/Vite).
- */
-
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, LineChart, Line, Legend,
+  BarChart, Bar, LineChart, Line, AreaChart, Area,
+  PieChart, Pie, Cell, RadarChart, Radar, PolarGrid,
+  PolarAngleAxis, XAxis, YAxis, CartesianGrid, Tooltip,
+  Legend, ResponsiveContainer
 } from "recharts";
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  API CONFIGURATION – fill these in or set matching REACT_APP_ env vars  ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-// Load saved credentials from localStorage (portal-entered) or fall back to env vars
-function loadSavedConfig() {
-  try {
-    const saved = JSON.parse(localStorage.getItem("secops_integrations") || "{}");
-    return {
-      fortinet:     { host: saved.fortinet_host || process.env.REACT_APP_FORTINET_HOST || "", apiKey: saved.fortinet_apikey || process.env.REACT_APP_FORTINET_APIKEY || "" },
-      paloalto:     { host: saved.paloalto_host || process.env.REACT_APP_PALOALTO_HOST || "", apiKey: saved.paloalto_apikey || process.env.REACT_APP_PALOALTO_APIKEY || "" },
-      upguard:      { apiKey: saved.upguard_apikey || process.env.REACT_APP_UPGUARD_APIKEY || "" },
-      azure:        { tenantId: saved.azure_tenant_id || process.env.REACT_APP_AZURE_TENANT_ID || "", clientId: saved.azure_client_id || process.env.REACT_APP_AZURE_CLIENT_ID || "", clientSecret: saved.azure_client_secret || process.env.REACT_APP_AZURE_CLIENT_SECRET || "", subscriptionId: saved.azure_subscription_id || process.env.REACT_APP_AZURE_SUBSCRIPTION_ID || "" },
-      qualys:       { username: saved.qualys_username || process.env.REACT_APP_QUALYS_USERNAME || "", password: saved.qualys_password || process.env.REACT_APP_QUALYS_PASSWORD || "" },
-      manageengine: { host: saved.me_host || process.env.REACT_APP_ME_HOST || "", apiKey: saved.me_apikey || process.env.REACT_APP_ME_APIKEY || "" },
-      taegis:       { clientId: saved.taegis_client_id || "", clientSecret: saved.taegis_client_secret || "", region: saved.taegis_region || "us1" },
-    };
-  } catch { return { fortinet:{host:"",apiKey:""}, paloalto:{host:"",apiKey:""}, upguard:{apiKey:""}, azure:{tenantId:"",clientId:"",clientSecret:"",subscriptionId:""}, qualys:{username:"",password:""}, manageengine:{host:"",apiKey:""}, taegis:{clientId:"",clientSecret:"",region:"us1"} }; }
-}
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONFIG
+═══════════════════════════════════════════════════════════════════════════ */
+const API = window.location.hostname === "localhost" ? "http://localhost:4000" : "";
+const VER = "2.0";
 
-let CONFIG = loadSavedConfig();
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  API CLIENTS – one per tool                                             ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-/** Fortinet FortiGate REST API (v2)
- *  Docs: https://fndn.fortinet.net/index.php?/fortiapi/1-fortios/
- *  Auth: Bearer token in Authorization header
- */
-async function fetchFortinet(path, fallback) {
-  const { host, apiKey } = CONFIG.fortinet;
-  if (!host || !apiKey) return fallback;
-  try {
-    const res = await fetch(`${host}/api/v2${path}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!res.ok) throw new Error(res.statusText);
-    return (await res.json()).results ?? (await res.json());
-  } catch { return fallback; }
-}
-
-/** Palo Alto PAN-OS / Panorama REST API (v10.2+)
- *  Docs: https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-panorama-api
- *  Auth: X-PAN-KEY header
- */
-async function fetchPaloAlto(path, params = {}, fallback) {
-  const { host, apiKey } = CONFIG.paloalto;
-  if (!host || !apiKey) return fallback;
-  try {
-    const qs = new URLSearchParams({ ...params, key: apiKey }).toString();
-    const res = await fetch(`${host}${path}?${qs}`, {
-      headers: { "X-PAN-KEY": apiKey, Accept: "application/json" },
-    });
-    if (!res.ok) throw new Error(res.statusText);
-    return await res.json();
-  } catch { return fallback; }
-}
-
-/** UpGuard Cyber Risk API (v2)
- *  Docs: https://cyber-risk.upguard.com/api
- *  Auth: Authorization header with API key
- */
-async function fetchUpGuard(path, fallback) {
-  const { apiKey } = CONFIG.upguard;
-  if (!apiKey) return fallback;
-  try {
-    const res = await fetch(`https://cyber-risk.upguard.com/api/v2${path}`, {
-      headers: { Authorization: apiKey, Accept: "application/json" },
-    });
-    if (!res.ok) throw new Error(res.statusText);
-    return await res.json();
-  } catch { return fallback; }
-}
-
-/** Azure Defender for Cloud (Azure REST API)
- *  Docs: https://learn.microsoft.com/en-us/rest/api/defenderforcloud/
- *  Auth: OAuth2 Bearer (client credentials flow)
- */
-let _azureToken = null;
-async function getAzureToken() {
-  if (_azureToken && _azureToken.exp > Date.now()) return _azureToken.value;
-  const { tenantId, clientId, clientSecret } = CONFIG.azure;
-  if (!tenantId) return null;
-  try {
-    const res = await fetch(
-      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "client_credentials",
-          client_id: clientId,
-          client_secret: clientSecret,
-          scope: "https://management.azure.com/.default",
-        }),
-      }
-    );
-    const data = await res.json();
-    _azureToken = { value: data.access_token, exp: Date.now() + data.expires_in * 1000 - 30000 };
-    return _azureToken.value;
-  } catch { return null; }
-}
-async function fetchAzure(path, apiVersion, fallback) {
-  const token = await getAzureToken();
-  const { subscriptionId } = CONFIG.azure;
-  if (!token || !subscriptionId) return fallback;
-  try {
-    const res = await fetch(
-      `https://management.azure.com/subscriptions/${subscriptionId}${path}?api-version=${apiVersion}`,
-      { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } }
-    );
-    if (!res.ok) throw new Error(res.statusText);
-    return (await res.json()).value ?? (await res.json());
-  } catch { return fallback; }
-}
-
-/** Qualys VMDR / VAPT API (v2)
- *  Docs: https://www.qualys.com/documentation/
- *  Auth: HTTP Basic (username:password) + X-Requested-With header
- *  Note: Qualys API requires a backend proxy in production (CORS restriction)
- */
-async function fetchQualys(path, params = {}, fallback) {
-  const { username, password } = CONFIG.qualys;
-  if (!username) return fallback;
-  try {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`https://qualysapi.qualys.com${path}?${qs}`, {
-      headers: {
-        Authorization: `Basic ${btoa(`${username}:${password}`)}`,
-        "X-Requested-With": "XMLHttpRequest",
-        Accept: "application/json",
-      },
-    });
-    if (!res.ok) throw new Error(res.statusText);
-    return await res.json();
-  } catch { return fallback; }
-}
-
-/** ManageEngine Endpoint Central / Patch Manager Plus / Encryption
- *  Docs: https://www.manageengine.com/products/desktop-central/api/
- *  Auth: OAuth2 Bearer token (ZOHO accounts)
- */
-async function fetchME(path, fallback) {
-  const { host, apiKey } = CONFIG.manageengine;
-  if (!host || !apiKey) return fallback;
-  try {
-    const res = await fetch(`${host}${path}`, {
-      headers: { Authorization: `Zoho-oauthtoken ${apiKey}`, Accept: "application/json" },
-    });
-    if (!res.ok) throw new Error(res.statusText);
-    return await res.json();
-  } catch { return fallback; }
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  MOCK DATA (fallback when API keys not yet configured)                  ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-const MOCK = {
-  // ── Fortinet ──
-  fortinet: {
-    activeSessions: 14832,
-    blockedThreats24h: 2847,
-    topBlockedCountries: [
-      { country: "Russia", count: 812 }, { country: "China", count: 734 },
-      { country: "North Korea", count: 421 }, { country: "Iran", count: 287 },
-      { country: "Brazil", count: 193 },
-    ],
-    bandwidthIn: "4.2 Gbps", bandwidthOut: "1.8 Gbps",
-    policyViolations: 38,
-    ipsEvents: [
-      { severity: "Critical", count: 12 }, { severity: "High", count: 45 },
-      { severity: "Medium", count: 134 }, { severity: "Low", count: 289 },
-    ],
-  },
-  // ── Palo Alto ──
-  paloalto: {
-    threatsPrevented24h: 1923,
-    urlsBlocked: 4521,
-    wildFireDetections: 7,
-    globalProtectUsers: 342,
-    zoneHits: [
-      { zone: "DMZ→Internal", count: 3412 }, { zone: "External→DMZ", count: 8921 },
-      { zone: "Internal→External", count: 12840 },
-    ],
-    topApplications: [
-      { app: "ssl", count: 45120 }, { app: "web-browsing", count: 32870 },
-      { app: "ms-office365", count: 18940 }, { app: "zoom", count: 9210 },
-    ],
-  },
-  // ── UpGuard ──
-  upguard: {
-    overallScore: 734,
-    grade: "B",
-    risksByCategory: [
-      { category: "Website Security", score: 810, risk: "Low" },
-      { category: "Email Security", score: 692, risk: "Medium" },
-      { category: "Network Security", score: 745, risk: "Low" },
-      { category: "Phishing & Malware", score: 880, risk: "Low" },
-      { category: "Questionnaires", score: 560, risk: "High" },
-      { category: "Data Leaks", score: 620, risk: "Medium" },
-    ],
-    openIssues: 47,
-    criticalExposures: 3,
-    vendorRisks: [
-      { vendor: "AWS", score: 890, status: "Low" },
-      { vendor: "Microsoft 365", score: 820, status: "Low" },
-      { vendor: "Salesforce", score: 760, status: "Low" },
-      { vendor: "ServiceNow", score: 680, status: "Medium" },
-      { vendor: "Zoom", score: 590, status: "High" },
-    ],
-  },
-  // ── Azure Defender ──
-  azure: {
-    secureScore: 71,
-    maxScore: 100,
-    alerts: [
-      { name: "Suspicious PowerShell activity", severity: "High", resource: "vm-prod-01", time: "2h ago" },
-      { name: "Brute force attempt on RDP", severity: "Critical", resource: "vm-jumpbox", time: "4h ago" },
-      { name: "Anomalous network traffic", severity: "Medium", resource: "vnet-core", time: "6h ago" },
-      { name: "Possible data exfiltration", severity: "High", resource: "storage-01", time: "12h ago" },
-      { name: "Unencrypted storage blob", severity: "Low", resource: "blob-backup", time: "1d ago" },
-    ],
-    recommendations: { total: 84, high: 12, medium: 37, low: 35 },
-    complianceStandards: [
-      { standard: "ISO 27001", score: 82 },
-      { standard: "CIS Azure", score: 74 },
-      { standard: "PCI DSS", score: 68 },
-      { standard: "NIST SP 800-53", score: 71 },
-    ],
-    resourcesAtRisk: 23,
-  },
-  // ── Qualys ──
-  qualys: {
-    openVulnerabilities: {
-      critical: 14, high: 67, medium: 213, low: 489, info: 1204,
-    },
-    totalAssets: 1248,
-    scannedAssets: 1186,
-    lastScanDate: "2026-06-28",
-    topCVEs: [
-      { cve: "CVE-2024-21413", cvss: 9.8, affected: 34, title: "Outlook RCE" },
-      { cve: "CVE-2024-3400", cvss: 10.0, affected: 12, title: "PAN-OS Command Injection" },
-      { cve: "CVE-2024-1709", cvss: 9.8, affected: 8, title: "ConnectWise Auth Bypass" },
-      { cve: "CVE-2023-46604", cvss: 10.0, affected: 5, title: "Apache ActiveMQ RCE" },
-    ],
-    vulnTrend: [
-      { month: "Jan", critical: 22, high: 89 }, { month: "Feb", critical: 18, high: 81 },
-      { month: "Mar", critical: 16, high: 75 }, { month: "Apr", critical: 19, high: 72 },
-      { month: "May", critical: 15, high: 69 }, { month: "Jun", critical: 14, high: 67 },
-    ],
-    complianceScanPass: 74,
-  },
-  // ── ManageEngine ──
-  manageengine: {
-    assets: { total: 1248, windows: 842, mac: 187, linux: 219 },
-    patchCompliance: {
-      pct: 91, patchedDevices: 1136, unpatchedDevices: 112,
-      criticalMissing: 34, highMissing: 88,
-    },
-    patchAging: [
-      { age: "0-7 days", count: 34 }, { age: "8-30 days", count: 41 },
-      { age: "31-60 days", count: 22 }, { age: "61-90 days", count: 10 },
-      { age: "90+ days", count: 5 },
-    ],
-    encryption: {
-      total: 1248,
-      encrypted: 1087,
-      pct: 87,
-      byOS: [
-        { os: "Windows (BitLocker)", encrypted: 742, total: 842 },
-        { os: "macOS (FileVault)", encrypted: 180, total: 187 },
-        { os: "Linux (LUKS)", encrypted: 165, total: 219 },
-      ],
-      unencryptedCritical: 8,
-    },
-    recentPatches: [
-      { id: "MS24-001", name: "Cumulative Update KB5034441", severity: "Critical", deployed: "98%", date: "2026-06-25" },
-      { id: "MS24-032", name: "Security Update .NET 8", severity: "High", deployed: "85%", date: "2026-06-22" },
-      { id: "RHSA-24-1234", name: "OpenSSL 3.2.1", severity: "High", deployed: "91%", date: "2026-06-20" },
-      { id: "APPLE-24-001", name: "macOS Sonoma 14.4", severity: "Medium", deployed: "96%", date: "2026-06-18" },
-    ],
-  },
+const C = {
+  critical:"#dc2626", high:"#ea580c", medium:"#d97706", low:"#16a34a",
+  info:"#2563eb", ok:"#16a34a", warn:"#d97706",
+  primary:"#1d4ed8", primaryLight:"#3b82f6",
+  bg:"#f1f5f9", card:"#ffffff", sidebar:"#0f172a", header:"#1e293b",
+  text:"#0f172a", muted:"#64748b", border:"#e2e8f0",
 };
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  DATA LOADER – fetches all tools in parallel                            ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-async function loadAllData() {
-  const [
-    fortinetSessions, fortinetThreats, fortinetIPS,
-    paloAltoThreats, paloAltoApps,
-    upguardSummary, upguardVendors,
-    azureAlerts, azureScore, azureRecs,
-    qualysDetections, qualysTrend,
-    meAssets, mePatch, meEncryption,
-  ] = await Promise.all([
-    // Fortinet
-    fetchFortinet("/monitor/firewall/session", { count: MOCK.fortinet.activeSessions }),
-    fetchFortinet("/monitor/log/threat", MOCK.fortinet.blockedThreats24h),
-    fetchFortinet("/monitor/ips/anomaly", MOCK.fortinet.ipsEvents),
-    // Palo Alto (XML API log queries)
-    fetchPaloAlto("/api/", { type: "log", "log-type": "threat", nlogs: 100 }, MOCK.paloalto.threatsPrevented24h),
-    fetchPaloAlto("/api/", { type: "log", "log-type": "traffic", nlogs: 50 }, MOCK.paloalto.topApplications),
-    // UpGuard
-    fetchUpGuard("/risks/summary", MOCK.upguard),
-    fetchUpGuard("/vendors", MOCK.upguard.vendorRisks),
-    // Azure
-    fetchAzure("/providers/Microsoft.Security/alerts", "2022-01-01", MOCK.azure.alerts),
-    fetchAzure("/providers/Microsoft.Security/secureScores", "2020-01-01", MOCK.azure.secureScore),
-    fetchAzure("/providers/Microsoft.Security/assessments", "2021-06-01", MOCK.azure.recommendations),
-    // Qualys
-    fetchQualys("/api/2.0/fo/asset/host/vm/detection/", { action: "list", output_format: "JSON" }, MOCK.qualys),
-    fetchQualys("/api/2.0/fo/knowledge_base/vuln/", { action: "list", output_format: "JSON" }, MOCK.qualys.vulnTrend),
-    // ManageEngine
-    fetchME("/api/1.4/inventory/computers", MOCK.manageengine.assets),
-    fetchME("/api/1.4/patch/patchsummary", MOCK.manageengine.patchCompliance),
-    fetchME("/api/1.4/encryption/summary", MOCK.manageengine.encryption),
-  ]);
+const SEVERITY_COLORS = { Critical:C.critical, High:C.high, Medium:C.medium, Low:C.low, Info:C.info };
 
+const TOOLS = [
+  { key:"fortinet",     name:"Fortinet",       icon:"🔥", cat:"Network Security",  color:"#f97316" },
+  { key:"paloalto",     name:"Palo Alto",       icon:"🛡️", cat:"Network Security",  color:"#3b82f6" },
+  { key:"upguard",      name:"UpGuard",         icon:"🌐", cat:"Attack Surface",    color:"#8b5cf6" },
+  { key:"azure",        name:"Azure Defender",  icon:"☁️", cat:"Cloud Security",    color:"#0ea5e9" },
+  { key:"qualys",       name:"Qualys VMDR",     icon:"🔍", cat:"Vulnerability Mgmt",color:"#ec4899" },
+  { key:"manageengine", name:"ManageEngine",    icon:"💻", cat:"Asset Management",  color:"#14b8a6" },
+  { key:"taegis",       name:"Taegis XDR",      icon:"🎯", cat:"SIEM / XDR",        color:"#f59e0b" },
+];
+
+const INTERVALS = [
+  { label:"1 min",  value:60   },
+  { label:"5 min",  value:300  },
+  { label:"15 min", value:900  },
+  { label:"30 min", value:1800 },
+  { label:"1 hour", value:3600 },
+];
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOCK DATA  (displayed when no integrations are configured)
+═══════════════════════════════════════════════════════════════════════════ */
+function buildMock() {
+  const days = Array.from({length:30},(_,i)=>{
+    const d = new Date(); d.setDate(d.getDate()-29+i);
+    const base = 68+Math.round(Math.sin(i/5)*4+i*0.13);
+    return { date:d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"}), score:Math.min(100,base),
+      alerts:Math.max(0,12-Math.floor(i/4)+Math.round(Math.random()*3)),
+      vulns:Math.max(30,55-Math.floor(i/3)+Math.round(Math.random()*5)) };
+  });
   return {
-    fortinet: MOCK.fortinet,     // map real API shape here once live
-    paloalto: MOCK.paloalto,
-    upguard: MOCK.upguard,
-    azure: MOCK.azure,
-    qualys: MOCK.qualys,
-    manageengine: MOCK.manageengine,
+    score:74,
+    trend:days,
+    alerts:[
+      {id:1,severity:"Critical",title:"Lateral movement detected – Taegis XDR",tool:"taegis",resource:"SRV-DC01",time:"10 min ago",status:"Open"},
+      {id:2,severity:"Critical",title:"Ransomware signature matched on endpoint",tool:"taegis",resource:"WKS-FIN-007",time:"22 min ago",status:"Open"},
+      {id:3,severity:"High",title:"Critical CVE-2024-1234 unpatched on 14 hosts",tool:"qualys",resource:"Multiple",time:"1 hr ago",status:"Open"},
+      {id:4,severity:"High",title:"Exposed RDP port detected – external scan",tool:"upguard",resource:"192.168.10.45",time:"2 hr ago",status:"Investigating"},
+      {id:5,severity:"High",title:"Azure Security Score dropped below threshold",tool:"azure",resource:"Subscription",time:"3 hr ago",status:"Open"},
+      {id:6,severity:"Medium",title:"SSL certificate expires in 14 days",tool:"upguard",resource:"api.company.com",time:"4 hr ago",status:"Open"},
+      {id:7,severity:"Medium",title:"Fortinet IPS blocked exploit attempt",tool:"fortinet",resource:"DMZ-FW-01",time:"5 hr ago",status:"Resolved"},
+      {id:8,severity:"Medium",title:"Palo Alto PAN-OS update available",tool:"paloalto",resource:"PA-5250",time:"6 hr ago",status:"Scheduled"},
+      {id:9,severity:"Low",title:"Failed login attempts exceeded threshold",tool:"azure",resource:"admin@company.com",time:"8 hr ago",status:"Investigating"},
+      {id:10,severity:"Low",title:"23 endpoints missing latest patch",tool:"manageengine",resource:"Various",time:"12 hr ago",status:"Open"},
+    ],
+    vulnerabilities:[
+      {id:1,cve:"CVE-2024-1234",severity:"Critical",cvss:9.8,title:"Remote Code Execution in Apache Log4j",affected:14,status:"Unpatched",tool:"qualys",age:5},
+      {id:2,cve:"CVE-2024-2345",severity:"Critical",cvss:9.1,title:"Privilege Escalation – Windows Print Spooler",affected:8,status:"Unpatched",tool:"qualys",age:3},
+      {id:3,cve:"CVE-2024-3456",severity:"High",cvss:8.5,title:"SQL Injection in Web Application",affected:2,status:"In Progress",tool:"qualys",age:12},
+      {id:4,cve:"CVE-2024-4567",severity:"High",cvss:7.8,title:"Authentication Bypass – OpenSSH",affected:31,status:"Unpatched",tool:"qualys",age:8},
+      {id:5,cve:"CVE-2024-5678",severity:"High",cvss:7.5,title:"Buffer Overflow – Cisco IOS",affected:5,status:"Scheduled",tool:"qualys",age:21},
+      {id:6,cve:"CVE-2023-9999",severity:"Medium",cvss:6.5,title:"Cross-Site Scripting in CMS Portal",affected:1,status:"In Progress",tool:"qualys",age:45},
+      {id:7,cve:"CVE-2023-8888",severity:"Medium",cvss:5.8,title:"Information Disclosure – HTTP Headers",affected:18,status:"Unpatched",tool:"qualys",age:67},
+    ],
+    riskByDomain:[
+      {domain:"Network Security",  score:82, maxScore:100, controls:24, gaps:4},
+      {domain:"Cloud Security",    score:71, maxScore:100, controls:18, gaps:7},
+      {domain:"Endpoint Security", score:78, maxScore:100, controls:15, gaps:3},
+      {domain:"Identity & Access", score:69, maxScore:100, controls:20, gaps:8},
+      {domain:"Attack Surface",    score:68, maxScore:100, controls:12, gaps:5},
+      {domain:"Vulnerability Mgmt",score:65, maxScore:100, controls:16, gaps:9},
+      {domain:"Data Protection",   score:80, maxScore:100, controls:10, gaps:2},
+    ],
+    compliance:[
+      {framework:"SOC 2 Type II",     score:87, controls:112, passing:97,  color:"#3b82f6"},
+      {framework:"ISO 27001",         score:82, controls:93,  passing:76,  color:"#8b5cf6"},
+      {framework:"PCI-DSS v4",        score:91, controls:251, passing:228, color:"#10b981"},
+      {framework:"NIST CSF",          score:75, controls:108, passing:81,  color:"#f59e0b"},
+      {framework:"Essential Eight",   score:70, controls:40,  passing:28,  color:"#ec4899"},
+    ],
+    firewall:{
+      blockedToday:12847, allowedToday:184293, topThreatCountries:[
+        {country:"RU",count:3241},{country:"CN",count:2189},{country:"KP",count:987},
+        {country:"IR",count:654},{country:"BR",count:432},
+      ],
+      trafficByHour: Array.from({length:24},(_,h)=>({
+        hour:`${h.toString().padStart(2,"0")}:00`,
+        blocked:Math.round(300+Math.random()*800+(h>=9&&h<=17?400:0)),
+        allowed:Math.round(3000+Math.random()*8000+(h>=9&&h<=17?4000:0)),
+      })),
+      topPolicies:[
+        {name:"Block Malicious IP",hits:5421,action:"Deny"},
+        {name:"Allow Corporate VPN",hits:3218,action:"Allow"},
+        {name:"Block Tor Exit Nodes",hits:1876,action:"Deny"},
+        {name:"IPS – Exploit Prevention",hits:892,action:"Drop"},
+        {name:"URL Filtering – Gambling",hits:674,action:"Deny"},
+      ],
+    },
+    assets:{
+      total:342, online:298, offline:44,
+      patchedPct:72, encryptedPct:85,
+      byType:[
+        {type:"Workstation",count:198,patched:148,encrypted:178},
+        {type:"Server",count:87,patched:62,encrypted:85},
+        {type:"Network Device",count:34,patched:24,encrypted:0},
+        {type:"Mobile",count:23,patched:18,encrypted:21},
+      ],
+      recentPatches:[
+        {date:"2024-06-28",name:"Windows KB5039894",devices:42,status:"Success"},
+        {date:"2024-06-25",name:"Chrome 126.0",devices:187,status:"Success"},
+        {date:"2024-06-20",name:"Office 365 June Update",devices:198,status:"Partial"},
+        {date:"2024-06-15",name:"Adobe Reader 24.002",devices:134,status:"Success"},
+      ],
+    },
+    surface:{
+      score:68, grade:"C+",
+      findings:[
+        {severity:"Critical",title:"Open RDP to internet (port 3389)",asset:"192.168.10.45",first:"2024-06-20"},
+        {severity:"High",title:"SSL certificate expires in 14 days",asset:"api.company.com",first:"2024-06-25"},
+        {severity:"High",title:"Subdomain takeover risk detected",asset:"legacy.company.com",first:"2024-06-22"},
+        {severity:"Medium",title:"HTTP security headers missing (CSP)",asset:"www.company.com",first:"2024-06-01"},
+        {severity:"Medium",title:"SSH accessible from 0.0.0.0/0",asset:"backup.company.com",first:"2024-05-15"},
+        {severity:"Low",title:"DMARC policy not enforced",asset:"company.com",first:"2024-04-10"},
+      ],
+      ipRanges:5, domains:12, subdomains:34, openPorts:18,
+    },
+    siem:{
+      eventsToday:284710, meanDetect:"4.2 min", activeIncidents:3,
+      events:[
+        {time:"10:42",type:"Malware",severity:"Critical",desc:"Ransomware file activity on FIN-WKS007",src:"10.1.5.7",status:"Active"},
+        {time:"10:28",type:"Lateral Movement",severity:"Critical",desc:"Pass-the-hash to Domain Controller",src:"10.1.5.7",status:"Active"},
+        {time:"09:15",type:"Brute Force",severity:"High",desc:"5000+ auth failures – admin account",src:"185.220.101.42",status:"Active"},
+        {time:"08:33",type:"C2 Beacon",severity:"High",desc:"Outbound connection to known C2 IP",src:"10.2.1.44",status:"Contained"},
+        {time:"07:21",type:"Privilege Escalation",severity:"High",desc:"Mimikatz usage detected",src:"10.1.3.22",status:"Contained"},
+        {time:"06:45",type:"Anomaly",severity:"Medium",desc:"Unusual data exfiltration volume",src:"10.3.2.11",status:"Investigating"},
+      ],
+    },
   };
 }
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  SHARED UI COMPONENTS                                                   ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-const SEV_COLOR  = { Critical: "#ef4444", High: "#f97316", Medium: "#eab308", Low: "#3b82f6", Info: "#9ca3af" };
-const SEV_BADGE  = { Critical: "bg-red-600 text-white", High: "bg-orange-500 text-white", Medium: "bg-yellow-400 text-gray-900", Low: "bg-blue-400 text-white", Info: "bg-gray-300 text-gray-700" };
-const RISK_BADGE = { Low: "bg-green-100 text-green-700", Medium: "bg-yellow-100 text-yellow-800", High: "bg-red-100 text-red-700" };
-
-function Badge({ text, map }) {
-  const cls = (map || SEV_BADGE)[text] || "bg-gray-200 text-gray-700";
-  return <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${cls}`}>{text}</span>;
-}
-
-function ToolTag({ name, color }) {
-  return <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${color} mr-1`}>{name}</span>;
-}
-
-function SectionCard({ title, tool, toolColor, children, className = "" }) {
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHARED COMPONENTS
+═══════════════════════════════════════════════════════════════════════════ */
+function Card({ children, style={}, className="" }) {
   return (
-    <div className={`bg-white rounded-xl shadow p-4 flex flex-col ${className}`}>
-      <div className="flex items-center justify-between mb-3 border-b pb-2">
-        <h3 className="text-sm font-bold text-gray-700">{title}</h3>
-        {tool && <ToolTag name={tool} color={toolColor} />}
+    <div style={{ background:C.card, borderRadius:12, boxShadow:"0 1px 3px rgba(0,0,0,0.08),0 1px 2px rgba(0,0,0,0.06)", border:`1px solid ${C.border}`, ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function SectionTitle({ title, subtitle, action }) {
+  return (
+    <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:20 }}>
+      <div>
+        <h2 style={{ fontSize:18, fontWeight:700, color:C.text, margin:0 }}>{title}</h2>
+        {subtitle && <p style={{ fontSize:13, color:C.muted, margin:"4px 0 0" }}>{subtitle}</p>}
       </div>
-      <div className="flex-1">{children}</div>
+      {action}
     </div>
   );
 }
 
-function KPICard({ label, value, sub, icon, accent, tool, toolColor }) {
+function MetricCard({ icon, label, value, sub, trend, trendUp, color=C.primary, onClick }) {
+  const isPositive = trendUp === undefined ? true : trendUp;
   return (
-    <div className="bg-white rounded-xl shadow p-3 flex flex-col items-center justify-center min-w-0 relative">
-      {tool && (
-        <span className={`absolute top-1.5 right-1.5 text-[8px] font-bold px-1.5 py-0.5 rounded-full ${toolColor}`}>
-          {tool}
-        </span>
-      )}
-      <div className="text-xl mb-1">{icon}</div>
-      <div className={`text-2xl font-bold ${accent}`}>{value}</div>
-      {sub && <div className="text-[9px] text-gray-400">{sub}</div>}
-      <div className="text-[10px] text-gray-500 text-center mt-0.5 leading-tight">{label}</div>
-    </div>
-  );
-}
-
-function GaugeRing({ value, size = 80, color = "#22c55e", label }) {
-  const r = (size - 10) / 2;
-  const circ = 2 * Math.PI * r;
-  const dash = Math.max(0, Math.min(1, value / 100)) * circ;
-  return (
-    <div className="flex flex-col items-center">
-      <svg width={size} height={size}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e5e7eb" strokeWidth={10} />
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={10}
-          strokeDasharray={`${dash} ${circ - dash}`} strokeLinecap="round"
-          transform={`rotate(-90 ${size/2} ${size/2})`} />
-        <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle"
-          fontSize="13" fontWeight="bold" fill={color}>{value}%</text>
-      </svg>
-      {label && <span className="text-[9px] text-gray-500 text-center mt-0.5 leading-tight max-w-16">{label}</span>}
-    </div>
-  );
-}
-
-function HBar({ label, value, max, color }) {
-  const pct = Math.round((value / max) * 100);
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="w-28 text-gray-500 truncate flex-shrink-0">{label}</span>
-      <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-        <div className="h-4 rounded-full flex items-center justify-end pr-1 text-[10px] text-white font-bold transition-all"
-          style={{ width: `${pct}%`, backgroundColor: color }}>
-          {value.toLocaleString()}
+    <Card style={{ padding:20, cursor:onClick?"pointer":"default" }} onClick={onClick}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+        <div>
+          <div style={{ fontSize:12, fontWeight:600, color:C.muted, textTransform:"uppercase", letterSpacing:0.8, marginBottom:8 }}>{label}</div>
+          <div style={{ fontSize:32, fontWeight:800, color:C.text, lineHeight:1 }}>{value}</div>
+          {sub && <div style={{ fontSize:12, color:C.muted, marginTop:6 }}>{sub}</div>}
+          {trend && (
+            <div style={{ fontSize:12, color:isPositive ? C.ok : C.critical, marginTop:6, fontWeight:600 }}>
+              {isPositive ? "▲" : "▼"} {trend}
+            </div>
+          )}
+        </div>
+        <div style={{ width:44, height:44, borderRadius:10, background:`${color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>
+          {icon}
         </div>
       </div>
+    </Card>
+  );
+}
+
+function SeverityBadge({ level }) {
+  const colors = { Critical:["#fef2f2","#dc2626"], High:["#fff7ed","#ea580c"], Medium:["#fffbeb","#d97706"], Low:["#f0fdf4","#16a34a"], Info:["#eff6ff","#2563eb"] };
+  const [bg, text] = colors[level] || ["#f8fafc","#64748b"];
+  return (
+    <span style={{ display:"inline-flex", alignItems:"center", padding:"2px 10px", borderRadius:20, background:bg, color:text, fontSize:11, fontWeight:700, letterSpacing:0.3 }}>
+      {level === "Critical" && "⬤ "}{level}
+    </span>
+  );
+}
+
+function ScoreGauge({ score, size=180 }) {
+  const color = score >= 80 ? C.ok : score >= 65 ? C.warn : C.critical;
+  const label = score >= 80 ? "STRONG" : score >= 65 ? "MODERATE" : "AT RISK";
+  const pct = score / 100;
+  const r = size * 0.38;
+  const cx = size / 2;
+  const cy = size * 0.56;
+  const startAngle = Math.PI;
+  const endAngle = 0;
+  const arcLen = endAngle - startAngle;
+  const sweep = startAngle + arcLen * pct;
+  const x1 = cx + r * Math.cos(startAngle);
+  const y1 = cy + r * Math.sin(startAngle);
+  const x2 = cx + r * Math.cos(endAngle);
+  const y2 = cy + r * Math.sin(endAngle);
+  const sx = cx + r * Math.cos(startAngle);
+  const sy = cy + r * Math.sin(startAngle);
+  const ex = cx + r * Math.cos(sweep);
+  const ey = cy + r * Math.sin(sweep);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center" }}>
+      <svg width={size} height={size * 0.62}>
+        {/* Track */}
+        <path d={`M ${cx-r} ${cy} A ${r} ${r} 0 0 1 ${cx+r} ${cy}`}
+          fill="none" stroke="#e2e8f0" strokeWidth={size*0.08} strokeLinecap="round"/>
+        {/* Progress */}
+        <path d={`M ${sx} ${sy} A ${r} ${r} 0 ${pct > 0.5 ? 1 : 0} 1 ${ex} ${ey}`}
+          fill="none" stroke={color} strokeWidth={size*0.08} strokeLinecap="round"
+          style={{filter:`drop-shadow(0 0 6px ${color}60)`}}/>
+        {/* Score text */}
+        <text x={cx} y={cy-2} textAnchor="middle" fontSize={size*0.22} fontWeight="800" fill={C.text}>{score}</text>
+        <text x={cx} y={cy+size*0.08} textAnchor="middle" fontSize={size*0.07} fontWeight="600" fill={color} letterSpacing="1">{label}</text>
+      </svg>
+      <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>Security Health Score</div>
     </div>
   );
 }
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  OVERVIEW PAGE                                                          ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-function OverviewPage({ d }) {
-  const totalThreats = (d.fortinet.blockedThreats24h || 0) + (d.paloalto.threatsPrevented24h || 0);
-  const totalVulns = d.qualys.openVulnerabilities;
-  const critVulns = totalVulns.critical;
-
+function RiskBar({ label, score }) {
+  const color = score >= 80 ? C.ok : score >= 65 ? C.warn : C.critical;
   return (
-    <div className="space-y-4">
-      {/* KPI Row */}
-      <div className="grid grid-cols-7 gap-3">
-        <KPICard label="Azure Secure Score" value={`${d.azure.secureScore}%`} icon="☁️" accent="text-blue-600" tool="Azure" toolColor="bg-blue-100 text-blue-700" />
-        <KPICard label="UpGuard Score" value={d.upguard.overallScore} sub={`Grade ${d.upguard.grade}`} icon="🌐" accent="text-green-600" tool="UpGuard" toolColor="bg-teal-100 text-teal-700" />
-        <KPICard label="Threats Blocked (24h)" value={totalThreats.toLocaleString()} icon="🔥" accent="text-red-500" tool="FG+PA" toolColor="bg-red-100 text-red-700" />
-        <KPICard label="Critical Vulnerabilities" value={critVulns} icon="🐛" accent="text-orange-500" tool="Qualys" toolColor="bg-orange-100 text-orange-700" />
-        <KPICard label="Patch Compliance" value={`${d.manageengine.patchCompliance.pct}%`} icon="🩹" accent="text-green-600" tool="ME" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Encryption Coverage" value={`${d.manageengine.encryption.pct}%`} icon="🔐" accent="text-purple-600" tool="ME" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Open Cloud Alerts" value={d.azure.alerts.length} icon="🚨" accent="text-red-500" tool="Azure" toolColor="bg-blue-100 text-blue-700" />
+    <div style={{ marginBottom:12 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+        <span style={{ fontSize:13, color:C.text, fontWeight:500 }}>{label}</span>
+        <span style={{ fontSize:13, fontWeight:700, color }}>{score}/100</span>
       </div>
-
-      {/* Row 2 */}
-      <div className="grid grid-cols-3 gap-3">
-        {/* Firewall Summary */}
-        <SectionCard title="Firewall – Combined View" tool="Fortinet + PaloAlto" toolColor="bg-red-100 text-red-700">
-          <div className="space-y-1.5">
-            <div className="flex justify-between text-xs py-1 border-b">
-              <span className="text-gray-500">Fortinet Active Sessions</span>
-              <span className="font-bold text-blue-600">{d.fortinet.activeSessions.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between text-xs py-1 border-b">
-              <span className="text-gray-500">FG Threats Blocked (24h)</span>
-              <span className="font-bold text-red-500">{d.fortinet.blockedThreats24h.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between text-xs py-1 border-b">
-              <span className="text-gray-500">PA Threats Prevented (24h)</span>
-              <span className="font-bold text-red-500">{d.paloalto.threatsPrevented24h.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between text-xs py-1 border-b">
-              <span className="text-gray-500">PA WildFire Detections</span>
-              <span className="font-bold text-orange-500">{d.paloalto.wildFireDetections}</span>
-            </div>
-            <div className="flex justify-between text-xs py-1 border-b">
-              <span className="text-gray-500">PA URLs Blocked</span>
-              <span className="font-bold text-purple-500">{d.paloalto.urlsBlocked.toLocaleString()}</span>
-            </div>
-            <div className="flex justify-between text-xs py-1">
-              <span className="text-gray-500">FG Policy Violations</span>
-              <span className="font-bold text-orange-500">{d.fortinet.policyViolations}</span>
-            </div>
-          </div>
-        </SectionCard>
-
-        {/* Vuln Overview */}
-        <SectionCard title="Vulnerability Summary" tool="Qualys" toolColor="bg-orange-100 text-orange-700">
-          <div className="space-y-1.5">
-            {Object.entries(d.qualys.openVulnerabilities).map(([sev, count]) => (
-              <div key={sev} className="flex items-center gap-2">
-                <span className="capitalize text-xs text-gray-500 w-16">{sev}</span>
-                <div className="flex-1 bg-gray-100 rounded-full h-5 overflow-hidden">
-                  <div className="h-5 rounded-full flex items-center justify-end pr-2 text-[10px] font-bold text-white"
-                    style={{ width: `${Math.min(100,(count/1204)*100)}%`, backgroundColor: SEV_COLOR[sev.charAt(0).toUpperCase()+sev.slice(1)]||"#9ca3af" }}>
-                    {count}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="mt-2 text-xs text-gray-400 text-center">
-            {d.qualys.scannedAssets}/{d.qualys.totalAssets} assets scanned · Last: {d.qualys.lastScanDate}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Compliance Posture" tool="Azure + Qualys" toolColor="bg-blue-100 text-blue-700">
-          <div className="space-y-2">
-            {d.azure.complianceStandards.map((s) => (
-              <div key={s.standard} className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 w-28 flex-shrink-0">{s.standard}</span>
-                <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                  <div className="h-4 rounded-full" style={{ width:`${s.score}%`, backgroundColor: s.score>=80?"#22c55e":s.score>=65?"#eab308":"#ef4444" }} />
-                </div>
-                <span className="text-xs font-bold text-gray-600 w-8 text-right">{s.score}%</span>
-              </div>
-            ))}
-          </div>
-          <div className="mt-2 text-xs flex gap-2 justify-center">
-            <span className="text-green-600">≥80 Good</span><span className="text-yellow-600">65-79 Fair</span><span className="text-red-600">&lt;65 Risk</span>
-          </div>
-        </SectionCard>
-      </div>
-
-      {/* Row 3 */}
-      <div className="grid grid-cols-3 gap-3">
-        <SectionCard title="Latest Azure Alerts" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700">
-          <div className="space-y-1.5">
-            {d.azure.alerts.slice(0,5).map((a,i) => (
-              <div key={i} className="flex items-start gap-2 text-xs border-b last:border-0 pb-1.5">
-                <Badge text={a.severity} map={SEV_BADGE} />
-                <div className="flex-1">
-                  <div className="text-gray-700 font-medium">{a.name}</div>
-                  <div className="text-gray-400">{a.resource} · {a.time}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="UpGuard Risk Categories" tool="UpGuard" toolColor="bg-teal-100 text-teal-700">
-          <div className="space-y-1.5">
-            {d.upguard.risksByCategory.map((r) => (
-              <div key={r.category} className="flex items-center gap-2 text-xs">
-                <span className="text-gray-500 w-32 truncate flex-shrink-0">{r.category}</span>
-                <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                  <div className="h-4 rounded-full" style={{ width:`${(r.score/1000)*100}%`, backgroundColor:r.risk==="Low"?"#22c55e":r.risk==="Medium"?"#eab308":"#ef4444" }} />
-                </div>
-                <Badge text={r.risk} map={RISK_BADGE} />
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="ME Patch & Encryption Status" tool="ManageEngine" toolColor="bg-purple-100 text-purple-700">
-          <div className="flex gap-3 mb-3">
-            <GaugeRing value={d.manageengine.patchCompliance.pct} color="#22c55e" label="Patch Compliance" />
-            <GaugeRing value={d.manageengine.encryption.pct} color="#8b5cf6" label="Encryption Coverage" />
-            <div className="flex-1 space-y-1.5 text-xs">
-              <div className="bg-red-50 rounded p-1.5 text-center">
-                <div className="text-red-600 font-bold text-lg">{d.manageengine.patchCompliance.criticalMissing}</div>
-                <div className="text-gray-500">Critical Patches Missing</div>
-              </div>
-              <div className="bg-purple-50 rounded p-1.5 text-center">
-                <div className="text-purple-600 font-bold text-lg">{d.manageengine.encryption.unencryptedCritical}</div>
-                <div className="text-gray-500">Critical Unencrypted</div>
-              </div>
-            </div>
-          </div>
-        </SectionCard>
+      <div style={{ height:8, background:"#f1f5f9", borderRadius:4, overflow:"hidden" }}>
+        <div style={{ height:"100%", width:`${score}%`, background:`linear-gradient(90deg,${color}bb,${color})`, borderRadius:4, transition:"width 1s ease" }} />
       </div>
     </div>
   );
 }
 
-// ── FIREWALL PAGE ─────────────────────────────────────────────────────────────
-function FirewallPage({ d }) {
-  const fg = d.fortinet; const pa = d.paloalto;
+function StatRow({ label, value, sub, color }) {
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <KPICard label="FG Active Sessions" value={fg.activeSessions.toLocaleString()} icon="🔗" accent="text-blue-600" tool="Fortinet" toolColor="bg-red-100 text-red-700" />
-        <KPICard label="FG Bandwidth IN" value={fg.bandwidthIn} icon="⬇️" accent="text-green-600" tool="Fortinet" toolColor="bg-red-100 text-red-700" />
-        <KPICard label="PA Threats Stopped" value={pa.threatsPrevented24h.toLocaleString()} icon="🛑" accent="text-red-500" tool="PaloAlto" toolColor="bg-orange-100 text-orange-700" />
-        <KPICard label="PA GlobalProtect VPN" value={pa.globalProtectUsers} icon="🔒" accent="text-purple-600" tool="PaloAlto" toolColor="bg-orange-100 text-orange-700" />
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+      <span style={{ fontSize:13, color:C.text }}>{label}</span>
+      <div style={{ textAlign:"right" }}>
+        <span style={{ fontSize:14, fontWeight:700, color:color||C.text }}>{value}</span>
+        {sub && <div style={{ fontSize:11, color:C.muted }}>{sub}</div>}
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <SectionCard title="Fortinet – IPS Events by Severity" tool="FortiGate" toolColor="bg-red-100 text-red-700">
-          <div className="space-y-2 mt-1">
-            {fg.ipsEvents.map((e) => (
-              <HBar key={e.severity} label={e.severity} value={e.count} max={300} color={SEV_COLOR[e.severity]} />
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXECUTIVE PAGES
+═══════════════════════════════════════════════════════════════════════════ */
+
+// ── Security Posture (Executive Home) ────────────────────────────────────────
+function OverviewPage({ data }) {
+  const d = data || buildMock();
+  const critAlerts = d.alerts.filter(a=>a.severity==="Critical").length;
+  const highAlerts = d.alerts.filter(a=>a.severity==="High").length;
+  const critVulns = d.vulnerabilities?.filter(v=>v.severity==="Critical").length || 0;
+  const openVulns = d.vulnerabilities?.filter(v=>v.status!=="Resolved").length || 0;
+  const avgCompliance = d.compliance ? Math.round(d.compliance.reduce((s,c)=>s+c.score,0)/d.compliance.length) : 82;
+
+  return (
+    <div>
+      <SectionTitle title="Security Posture Overview"
+        subtitle={`Organisation-wide security health as of ${new Date().toLocaleDateString("en-AU",{weekday:"long",year:"numeric",month:"long",day:"numeric"})}`} />
+
+      {/* Top KPI row */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        <MetricCard icon="🛡️" label="Security Score" value={`${d.score}/100`}
+          trend="↑ 3 pts this month" trendUp={true} color={C.primaryLight} />
+        <MetricCard icon="🚨" label="Critical Alerts" value={critAlerts}
+          sub={`${highAlerts} High, ${d.alerts.filter(a=>a.severity==="Medium").length} Medium`}
+          trend={critAlerts > 0 ? `${critAlerts} require immediate action` : "None active"}
+          trendUp={critAlerts === 0} color={critAlerts > 0 ? C.critical : C.ok} />
+        <MetricCard icon="🔍" label="Open Vulnerabilities" value={openVulns}
+          sub={`${critVulns} Critical severity`}
+          trend={critVulns > 0 ? `${critVulns} critical unpatched` : "No critical vulns"}
+          trendUp={critVulns === 0} color={critVulns > 0 ? C.critical : C.ok} />
+        <MetricCard icon="✅" label="Compliance" value={`${avgCompliance}%`}
+          sub={`Across ${d.compliance?.length || 5} frameworks`}
+          trend="↑ 2% since last audit" trendUp={true} color={C.ok} />
+      </div>
+
+      {/* Main content grid */}
+      <div style={{ display:"grid", gridTemplateColumns:"300px 1fr 280px", gap:16, marginBottom:24 }}>
+        {/* Score gauge */}
+        <Card style={{ padding:24, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+          <ScoreGauge score={d.score} size={200} />
+          <div style={{ marginTop:16, width:"100%" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:C.muted, marginBottom:4 }}>
+              <span>At Risk</span><span>Moderate</span><span>Strong</span>
+            </div>
+            <div style={{ height:6, borderRadius:3, background:"linear-gradient(90deg,#dc2626,#d97706,#16a34a)" }} />
+          </div>
+        </Card>
+
+        {/* 30-day trend */}
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>30-Day Security Trend</div>
+          <ResponsiveContainer width="100%" height={180}>
+            <AreaChart data={d.trend} margin={{top:5,right:10,left:-20,bottom:0}}>
+              <defs>
+                <linearGradient id="scoreGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={C.primaryLight} stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor={C.primaryLight} stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+              <XAxis dataKey="date" tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}
+                interval={4} />
+              <YAxis domain={[50,100]} tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}} />
+              <Area type="monotone" dataKey="score" stroke={C.primaryLight} strokeWidth={2.5}
+                fill="url(#scoreGrad)" name="Security Score" />
+            </AreaChart>
+          </ResponsiveContainer>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:12 }}>
+            <div style={{ background:"#f8fafc", borderRadius:8, padding:"8px 12px" }}>
+              <div style={{ fontSize:11, color:C.muted }}>30-day avg alerts</div>
+              <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{Math.round(d.trend.reduce((s,t)=>s+t.alerts,0)/d.trend.length)}</div>
+            </div>
+            <div style={{ background:"#f8fafc", borderRadius:8, padding:"8px 12px" }}>
+              <div style={{ fontSize:11, color:C.muted }}>Avg open vulns</div>
+              <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{Math.round(d.trend.reduce((s,t)=>s+t.vulns,0)/d.trend.length)}</div>
+            </div>
+          </div>
+        </Card>
+
+        {/* Risk summary */}
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Risk by Domain</div>
+          {d.riskByDomain.map(r=>(
+            <RiskBar key={r.domain} label={r.domain} score={r.score} />
+          ))}
+        </Card>
+      </div>
+
+      {/* Bottom row */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        {/* Critical alerts */}
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Active Critical & High Alerts</div>
+          <div>
+            {d.alerts.filter(a=>["Critical","High"].includes(a.severity)).slice(0,5).map(a=>(
+              <div key={a.id} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+                <div style={{ width:8, height:8, borderRadius:"50%", background:SEVERITY_COLORS[a.severity], marginTop:5, flexShrink:0 }} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, color:C.text, fontWeight:500, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{a.title}</div>
+                  <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>{TOOLS.find(t=>t.key===a.tool)?.name} • {a.resource} • {a.time}</div>
+                </div>
+                <SeverityBadge level={a.severity} />
+              </div>
             ))}
           </div>
-          <div className="mt-3 space-y-1">
-            <div className="flex justify-between text-xs"><span className="text-gray-500">Bandwidth OUT</span><span className="font-bold">{fg.bandwidthOut}</span></div>
-            <div className="flex justify-between text-xs"><span className="text-gray-500">Policy Violations</span><span className="font-bold text-orange-500">{fg.policyViolations}</span></div>
-          </div>
-        </SectionCard>
-        <SectionCard title="Fortinet – Top Blocked Countries" tool="FortiGate" toolColor="bg-red-100 text-red-700">
-          <div className="space-y-2">
-            {fg.topBlockedCountries.map((c) => (
-              <HBar key={c.country} label={c.country} value={c.count} max={900} color="#ef4444" />
-            ))}
-          </div>
-        </SectionCard>
-        <SectionCard title="Palo Alto – Zone Traffic Hits" tool="Panorama" toolColor="bg-orange-100 text-orange-700">
-          <ResponsiveContainer width="100%" height={140}>
-            <BarChart data={pa.zoneHits} margin={{ left:-10, bottom:0 }}>
-              <XAxis dataKey="zone" tick={{ fontSize:9 }} />
-              <YAxis tick={{ fontSize:9 }} />
-              <Tooltip />
-              <Bar dataKey="count" fill="#f97316" radius={[4,4,0,0]} />
+        </Card>
+
+        {/* Compliance */}
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Compliance Posture</div>
+          {d.compliance.map(c=>(
+            <div key={c.framework} style={{ marginBottom:14 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
+                <span style={{ fontSize:13, color:C.text, fontWeight:500 }}>{c.framework}</span>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span style={{ fontSize:12, color:C.muted }}>{c.passing}/{c.controls} controls</span>
+                  <span style={{ fontSize:14, fontWeight:700, color:c.score>=80?C.ok:c.score>=70?C.warn:C.critical }}>{c.score}%</span>
+                </div>
+              </div>
+              <div style={{ height:6, background:"#f1f5f9", borderRadius:3, overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${c.score}%`, background:c.color, borderRadius:3 }} />
+              </div>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ── Risk & Compliance ────────────────────────────────────────────────────────
+function RiskCompliancePage({ data }) {
+  const d = data || buildMock();
+  return (
+    <div>
+      <SectionTitle title="Risk & Compliance" subtitle="Detailed risk assessment and regulatory compliance status" />
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:16 }}>
+        {/* Compliance frameworks */}
+        <Card style={{ padding:24 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:20 }}>Framework Compliance Scores</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={d.compliance} layout="vertical" margin={{left:100,right:20}}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border} horizontal={false}/>
+              <XAxis type="number" domain={[0,100]} tick={{fontSize:11,fill:C.muted}} tickLine={false} axisLine={false}/>
+              <YAxis type="category" dataKey="framework" tick={{fontSize:11,fill:C.muted}} tickLine={false} axisLine={false} width={100}/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}
+                formatter={(v)=>[`${v}%`,"Score"]}/>
+              <Bar dataKey="score" radius={[0,4,4,0]}>
+                {d.compliance.map((c,i)=><Cell key={i} fill={c.color}/>)}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
-        </SectionCard>
-        <SectionCard title="Palo Alto – Top Applications" tool="Panorama" toolColor="bg-orange-100 text-orange-700">
-          <div className="space-y-2 mt-1">
-            {pa.topApplications.map((a) => (
-              <HBar key={a.app} label={a.app} value={a.count} max={50000} color="#f97316" />
+        </Card>
+
+        {/* Risk matrix */}
+        <Card style={{ padding:24 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:20 }}>Risk Register Summary</div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
+            {[
+              {label:"Critical Risks",count:2,color:C.critical},
+              {label:"High Risks",count:5,color:C.high},
+              {label:"Medium Risks",count:11,color:C.medium},
+              {label:"Low Risks",count:18,color:C.low},
+            ].map(r=>(
+              <div key={r.label} style={{ background:`${r.color}10`, border:`1px solid ${r.color}30`, borderRadius:10, padding:16, textAlign:"center" }}>
+                <div style={{ fontSize:32, fontWeight:800, color:r.color }}>{r.count}</div>
+                <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>{r.label}</div>
+              </div>
             ))}
           </div>
-          <div className="mt-3 flex justify-between text-xs">
-            <span className="text-gray-500">WildFire Detections (24h)</span>
-            <span className="font-bold text-red-500">{pa.wildFireDetections}</span>
-          </div>
-          <div className="flex justify-between text-xs">
-            <span className="text-gray-500">URLs Blocked</span>
-            <span className="font-bold text-orange-500">{pa.urlsBlocked.toLocaleString()}</span>
-          </div>
-        </SectionCard>
-      </div>
-    </div>
-  );
-}
-
-// ── ATTACK SURFACE PAGE ───────────────────────────────────────────────────────
-function AttackSurfacePage({ d }) {
-  const ug = d.upguard;
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <KPICard label="UpGuard Score" value={ug.overallScore} sub={`Grade ${ug.grade}`} icon="🌐" accent="text-teal-600" tool="UpGuard" toolColor="bg-teal-100 text-teal-700" />
-        <KPICard label="Open Issues" value={ug.openIssues} icon="⚠️" accent="text-orange-500" tool="UpGuard" toolColor="bg-teal-100 text-teal-700" />
-        <KPICard label="Critical Exposures" value={ug.criticalExposures} icon="🔴" accent="text-red-500" tool="UpGuard" toolColor="bg-teal-100 text-teal-700" />
-        <KPICard label="Vendors Monitored" value={ug.vendorRisks.length} icon="🤝" accent="text-blue-600" tool="UpGuard" toolColor="bg-teal-100 text-teal-700" />
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <SectionCard title="Risk Breakdown by Category" tool="UpGuard" toolColor="bg-teal-100 text-teal-700">
-          <div className="space-y-3 mt-1">
-            {ug.risksByCategory.map((r) => (
-              <div key={r.category}>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-gray-600 font-medium">{r.category}</span>
-                  <div className="flex items-center gap-1">
-                    <span className="font-bold text-gray-700">{r.score}</span>
-                    <Badge text={r.risk} map={RISK_BADGE} />
-                  </div>
-                </div>
-                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-2 rounded-full" style={{ width:`${(r.score/1000)*100}%`, backgroundColor:r.risk==="Low"?"#22c55e":r.risk==="Medium"?"#eab308":"#ef4444" }} />
+          <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:16 }}>
+            {d.riskByDomain.map(r=>(
+              <div key={r.domain} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0" }}>
+                <span style={{ fontSize:12, color:C.text }}>{r.domain}</span>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span style={{ fontSize:11, color:C.muted }}>{r.gaps} gaps</span>
+                  <span style={{ fontSize:12, fontWeight:700, color:r.score>=80?C.ok:r.score>=65?C.warn:C.critical }}>{r.score}/100</span>
                 </div>
               </div>
             ))}
           </div>
-        </SectionCard>
-        <SectionCard title="Third-Party Vendor Risk" tool="UpGuard" toolColor="bg-teal-100 text-teal-700">
-          <table className="w-full text-xs">
-            <thead><tr className="text-gray-400 border-b"><th className="text-left py-1">Vendor</th><th className="text-left py-1">Score</th><th className="text-left py-1">Risk</th></tr></thead>
-            <tbody>
-              {ug.vendorRisks.map((v) => (
-                <tr key={v.vendor} className="border-b last:border-0 hover:bg-gray-50">
-                  <td className="py-1.5 font-medium text-gray-700">{v.vendor}</td>
-                  <td className="py-1.5">
-                    <div className="flex items-center gap-1">
-                      <div className="w-16 bg-gray-100 rounded-full h-2">
-                        <div className="h-2 rounded-full" style={{ width:`${(v.score/1000)*100}%`, backgroundColor:v.status==="Low"?"#22c55e":v.status==="Medium"?"#eab308":"#ef4444" }} />
-                      </div>
-                      <span className="font-bold">{v.score}</span>
-                    </div>
-                  </td>
-                  <td className="py-1.5"><Badge text={v.status} map={RISK_BADGE} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </SectionCard>
+        </Card>
       </div>
+
+      {/* Action items */}
+      <Card style={{ padding:24 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Priority Action Items for Board</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+          {[
+            { priority:1, title:"Patch Critical CVEs", desc:"14 hosts running vulnerable Log4j. Patch within 48 hours to prevent remote code execution.", effort:"48hr", owner:"IT Security", status:"Urgent" },
+            { priority:2, title:"Close Open RDP Exposure", desc:"External RDP access detected on production server. Requires firewall rule change.", effort:"4hr", owner:"Network Ops", status:"Urgent" },
+            { priority:3, title:"MFA Enforcement", desc:"37% of privileged accounts lack MFA. Essential Eight requires 100% coverage.", effort:"1 week", owner:"IAM Team", status:"High" },
+            { priority:4, title:"Patch Cycle Improvement", desc:"28% of endpoints missing patches. Target: <5% within 30 days.", effort:"30 days", owner:"IT Ops", status:"High" },
+            { priority:5, title:"Azure Security Posture", desc:"7 security recommendations outstanding in Defender for Cloud.", effort:"2 weeks", owner:"Cloud Team", status:"Medium" },
+            { priority:6, title:"Incident Response Plan", desc:"IR playbooks need updating for ransomware scenario per current threat landscape.", effort:"3 weeks", owner:"CISO Office", status:"Medium" },
+          ].map(a=>(
+            <div key={a.priority} style={{ background:"#f8fafc", borderRadius:10, padding:16, border:`1px solid ${C.border}` }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                <span style={{ background:a.status==="Urgent"?C.critical:a.status==="High"?C.high:C.medium, color:"white", borderRadius:4, padding:"2px 8px", fontSize:10, fontWeight:700 }}>{a.status}</span>
+                <span style={{ fontSize:11, color:C.muted }}>#{a.priority}</span>
+              </div>
+              <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:6 }}>{a.title}</div>
+              <div style={{ fontSize:12, color:C.muted, marginBottom:8, lineHeight:1.5 }}>{a.desc}</div>
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:C.muted }}>
+                <span>⏱ {a.effort}</span><span>👤 {a.owner}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }
 
-// ── CLOUD SECURITY PAGE ───────────────────────────────────────────────────────
-function CloudPage({ d }) {
-  const az = d.azure;
-  const recData = [
-    { name:"High", value:az.recommendations.high, color:"#ef4444" },
-    { name:"Medium", value:az.recommendations.medium, color:"#f97316" },
-    { name:"Low", value:az.recommendations.low, color:"#3b82f6" },
+// ── Threat Intelligence ──────────────────────────────────────────────────────
+function ThreatPage({ data }) {
+  const d = data || buildMock();
+  const threatData = [
+    {name:"Jan",incidents:3},{name:"Feb",incidents:5},{name:"Mar",incidents:2},{name:"Apr",incidents:8},
+    {name:"May",incidents:6},{name:"Jun",incidents:4},
   ];
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <KPICard label="Secure Score" value={`${az.secureScore}%`} icon="☁️" accent="text-blue-600" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700" />
-        <KPICard label="Active Alerts" value={az.alerts.length} icon="🚨" accent="text-red-500" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700" />
-        <KPICard label="Recommendations" value={az.recommendations.total} icon="📋" accent="text-orange-500" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700" />
-        <KPICard label="Resources at Risk" value={az.resourcesAtRisk} icon="⚠️" accent="text-red-500" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700" />
+    <div>
+      <SectionTitle title="Threat Intelligence" subtitle="Active threats, incident timeline, and attack surface overview" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        <MetricCard icon="⚡" label="Events Today" value={d.siem?.eventsToday?.toLocaleString()||"284,710"} sub="From all security tools" color={C.primaryLight}/>
+        <MetricCard icon="🎯" label="Active Incidents" value={d.siem?.activeIncidents||3} sub="Requiring response" trendUp={false} color={C.critical}/>
+        <MetricCard icon="⏱" label="Mean Time to Detect" value={d.siem?.meanDetect||"4.2 min"} sub="Target: <5 min" trendUp={true} color={C.ok}/>
+        <MetricCard icon="🌍" label="Blocked Today" value={(d.firewall?.blockedToday||12847).toLocaleString()} sub="Malicious connections" color={C.high}/>
       </div>
-      <div className="grid grid-cols-3 gap-3">
-        <SectionCard title="Secure Score Gauge" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700">
-          <div className="flex items-center justify-center py-4">
-            <GaugeRing value={az.secureScore} size={120} color={az.secureScore>=75?"#22c55e":az.secureScore>=50?"#eab308":"#ef4444"} />
-          </div>
-          <div className="text-xs text-center text-gray-500 mt-1">Score: {az.secureScore}/{az.maxScore} · Target: 85%</div>
-        </SectionCard>
-        <SectionCard title="Recommendations by Priority" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700">
-          <div className="flex items-center justify-center py-2">
-            <PieChart width={160} height={140}>
-              <Pie data={recData} cx={80} cy={65} innerRadius={40} outerRadius={65} dataKey="value" label={({name,value})=>`${name}: ${value}`} labelLine={false} fontSize={9}>
-                {recData.map((e,i) => <Cell key={i} fill={e.color} />)}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </div>
-        </SectionCard>
-        <SectionCard title="Compliance Standards" tool="Azure Defender" toolColor="bg-blue-100 text-blue-700">
-          <div className="space-y-3 mt-1">
-            {az.complianceStandards.map((s) => (
-              <div key={s.standard}>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-gray-600">{s.standard}</span>
-                  <span className="font-bold">{s.score}%</span>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:16 }}>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Security Incidents – 2024</div>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={threatData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
+              <XAxis dataKey="name" tick={{fontSize:11,fill:C.muted}} tickLine={false} axisLine={false}/>
+              <YAxis tick={{fontSize:11,fill:C.muted}} tickLine={false} axisLine={false}/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}/>
+              <Bar dataKey="incidents" fill={C.primaryLight} radius={[4,4,0,0]} name="Incidents"/>
+            </BarChart>
+          </ResponsiveContainer>
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Threat Source Countries</div>
+          {d.firewall?.topThreatCountries?.map((c,i)=>(
+            <div key={c.country} style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
+              <span style={{ fontSize:11, color:C.muted, width:20, textAlign:"right" }}>#{i+1}</span>
+              <div style={{ flex:1 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
+                  <span style={{ fontSize:12, fontWeight:600, color:C.text }}>{c.country}</span>
+                  <span style={{ fontSize:12, color:C.muted }}>{c.count.toLocaleString()} attempts</span>
                 </div>
-                <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-3 rounded-full" style={{ width:`${s.score}%`, backgroundColor:s.score>=80?"#22c55e":s.score>=65?"#eab308":"#ef4444" }} />
+                <div style={{ height:6, background:"#f1f5f9", borderRadius:3 }}>
+                  <div style={{ height:"100%", width:`${(c.count/d.firewall.topThreatCountries[0].count)*100}%`, background:C.critical, borderRadius:3 }}/>
                 </div>
               </div>
-            ))}
-          </div>
-        </SectionCard>
+            </div>
+          ))}
+        </Card>
       </div>
-      <SectionCard title="Active Security Alerts" tool="Azure Defender for Cloud" toolColor="bg-blue-100 text-blue-700">
-        <table className="w-full text-xs">
-          <thead><tr className="text-gray-400 border-b"><th className="text-left py-1.5 pr-3">Alert Name</th><th className="text-left py-1.5 pr-3">Resource</th><th className="text-left py-1.5 pr-3">Severity</th><th className="text-left py-1.5">Time</th></tr></thead>
+      <Card style={{ padding:20 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Active SIEM Events – Past 12 Hours</div>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ background:"#f8fafc" }}>
+              {["Time","Type","Severity","Description","Source","Status"].map(h=>(
+                <th key={h} style={{ padding:"8px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`2px solid ${C.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
           <tbody>
-            {az.alerts.map((a,i) => (
-              <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
-                <td className="py-2 pr-3 font-medium text-gray-700">{a.name}</td>
-                <td className="py-2 pr-3 text-gray-500 font-mono text-[10px]">{a.resource}</td>
-                <td className="py-2 pr-3"><Badge text={a.severity} map={SEV_BADGE} /></td>
-                <td className="py-2 text-gray-400">{a.time}</td>
+            {d.siem?.events?.map((e,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted, fontFamily:"monospace" }}>{e.time}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, fontWeight:600, color:C.text }}>{e.type}</td>
+                <td style={{ padding:"10px 12px" }}><SeverityBadge level={e.severity}/></td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.text }}>{e.desc}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, fontFamily:"monospace", color:C.muted }}>{e.src}</td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:600, color:e.status==="Active"?C.critical:e.status==="Contained"?C.ok:C.warn }}>{e.status}</span>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
-      </SectionCard>
+      </Card>
     </div>
   );
 }
 
-// ── VULNERABILITIES PAGE ──────────────────────────────────────────────────────
-function VulnPage({ d }) {
-  const q = d.qualys;
-  const sevData = Object.entries(q.openVulnerabilities).map(([k,v]) => ({
-    name: k.charAt(0).toUpperCase()+k.slice(1), value:v,
-    color: SEV_COLOR[k.charAt(0).toUpperCase()+k.slice(1)]||"#9ca3af",
-  }));
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-5 gap-3">
-        {sevData.map((s) => (
-          <KPICard key={s.name} label={`${s.name} Vulns`} value={s.value} icon="🐛" accent="text-gray-700" tool="Qualys" toolColor="bg-orange-100 text-orange-700" />
-        ))}
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <SectionCard title="Vulnerability Trend (6 Months)" tool="Qualys VMDR" toolColor="bg-orange-100 text-orange-700">
-          <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={q.vulnTrend} margin={{ left:-10, right:10 }}>
-              <XAxis dataKey="month" tick={{ fontSize:10 }} />
-              <YAxis tick={{ fontSize:10 }} />
-              <Tooltip />
-              <Legend wrapperStyle={{ fontSize:10 }} />
-              <Line type="monotone" dataKey="critical" stroke="#ef4444" strokeWidth={2} dot={{ r:3 }} />
-              <Line type="monotone" dataKey="high" stroke="#f97316" strokeWidth={2} dot={{ r:3 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </SectionCard>
-        <SectionCard title="Top Critical CVEs" tool="Qualys VMDR" toolColor="bg-orange-100 text-orange-700">
-          <table className="w-full text-xs">
-            <thead><tr className="text-gray-400 border-b"><th className="text-left py-1">CVE</th><th className="text-left py-1">Title</th><th className="text-left py-1">CVSS</th><th className="text-left py-1">Affected</th></tr></thead>
-            <tbody>
-              {q.topCVEs.map((c) => (
-                <tr key={c.cve} className="border-b last:border-0 hover:bg-gray-50">
-                  <td className="py-2 font-mono text-blue-600 font-semibold">{c.cve}</td>
-                  <td className="py-2 text-gray-700">{c.title}</td>
-                  <td className="py-2"><span className={`font-bold ${c.cvss>=9?"text-red-600":"text-orange-500"}`}>{c.cvss}</span></td>
-                  <td className="py-2 font-bold text-gray-700">{c.affected}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="mt-2 flex justify-between text-xs text-gray-400">
-            <span>Assets scanned: {q.scannedAssets}/{q.totalAssets}</span>
-            <span>Compliance pass: {q.complianceScanPass}%</span>
-          </div>
-        </SectionCard>
-      </div>
-    </div>
-  );
-}
-
-// ── ASSETS & PATCHES PAGE ─────────────────────────────────────────────────────
-function AssetsPage({ d }) {
-  const me = d.manageengine;
-  const assetData = [
-    { name:"Windows", value:me.assets.windows, color:"#3b82f6" },
-    { name:"macOS",   value:me.assets.mac,     color:"#9ca3af" },
-    { name:"Linux",   value:me.assets.linux,   color:"#f97316" },
+// ── Cloud Security ───────────────────────────────────────────────────────────
+function CloudPage({ data }) {
+  const d = data || buildMock();
+  const cloudScore = 71;
+  const cloudItems = [
+    {cat:"Identity & Access",score:78,findings:3},{cat:"Data Protection",score:85,findings:1},
+    {cat:"Network Security",score:72,findings:5},{cat:"Compute Security",score:69,findings:6},
+    {cat:"Logging & Monitoring",score:88,findings:1},{cat:"App Security",score:63,findings:8},
   ];
-  const patchColors = ["#22c55e","#f97316","#eab308","#ef4444","#7c3aed"];
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <KPICard label="Total Assets" value={me.assets.total.toLocaleString()} icon="🖥️" accent="text-blue-600" tool="ME Endpoint" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Patch Compliance" value={`${me.patchCompliance.pct}%`} icon="🩹" accent="text-green-600" tool="ME Patch" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Critical Patches Missing" value={me.patchCompliance.criticalMissing} icon="🔴" accent="text-red-500" tool="ME Patch" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Unpatched Devices" value={me.patchCompliance.unpatchedDevices} icon="⚠️" accent="text-orange-500" tool="ME Patch" toolColor="bg-purple-100 text-purple-700" />
+    <div>
+      <SectionTitle title="Cloud Security – Azure" subtitle="Microsoft Defender for Cloud posture and recommendations" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        <MetricCard icon="☁️" label="Secure Score" value={`${cloudScore}%`} sub="Azure Defender target: 85%" trendUp={false} color={C.primaryLight}/>
+        <MetricCard icon="⚠️" label="Recommendations" value="15" sub="7 high severity" trendUp={false} color={C.high}/>
+        <MetricCard icon="🔒" label="Protected Resources" value="94%" sub="206 of 219 resources" trendUp={true} color={C.ok}/>
+        <MetricCard icon="💡" label="Quick Wins" value="4" sub="Low effort, high impact" trendUp={true} color={C.primary}/>
       </div>
-      <div className="grid grid-cols-3 gap-3">
-        <SectionCard title="Asset OS Distribution" tool="ME Endpoint Central" toolColor="bg-purple-100 text-purple-700">
-          <div className="flex items-center justify-center py-2">
-            <PieChart width={160} height={140}>
-              <Pie data={assetData} cx={80} cy={65} outerRadius={60} dataKey="value" label={({name,value})=>`${name}: ${value}`} labelLine={false} fontSize={9}>
-                {assetData.map((e,i) => <Cell key={i} fill={e.color} />)}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </div>
-        </SectionCard>
-        <SectionCard title="Patch Aging" tool="ME Patch Manager" toolColor="bg-purple-100 text-purple-700">
-          <div className="space-y-2 mt-1">
-            {me.patchAging.map((p,i) => (
-              <HBar key={p.age} label={p.age} value={p.count} max={45} color={patchColors[i]} />
-            ))}
-          </div>
-        </SectionCard>
-        <SectionCard title="Recent Patch Deployments" tool="ME Patch Manager" toolColor="bg-purple-100 text-purple-700">
-          <div className="space-y-2">
-            {me.recentPatches.map((p) => (
-              <div key={p.id} className="border-b last:border-0 pb-2">
-                <div className="flex justify-between text-xs mb-0.5">
-                  <span className="font-mono text-blue-600 font-bold">{p.id}</span>
-                  <Badge text={p.severity} map={SEV_BADGE} />
-                </div>
-                <div className="text-xs text-gray-700 truncate">{p.name}</div>
-                <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
-                  <span>{p.date}</span>
-                  <span className="font-bold text-green-600">{p.deployed} deployed</span>
+      <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:16 }}>
+        <Card style={{ padding:24 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:20 }}>Security Controls by Category</div>
+          {cloudItems.map(c=>(
+            <div key={c.cat} style={{ marginBottom:16 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                <span style={{ fontSize:13, color:C.text, fontWeight:500 }}>{c.cat}</span>
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ fontSize:11, color:C.muted }}>{c.findings} findings</span>
+                  <span style={{ fontSize:14, fontWeight:700, color:c.score>=80?C.ok:c.score>=70?C.warn:C.critical }}>{c.score}%</span>
                 </div>
               </div>
-            ))}
-          </div>
-        </SectionCard>
-      </div>
-    </div>
-  );
-}
-
-// ── ENCRYPTION PAGE ───────────────────────────────────────────────────────────
-function EncryptionPage({ d }) {
-  const enc = d.manageengine.encryption;
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <KPICard label="Total Endpoints" value={enc.total.toLocaleString()} icon="🖥️" accent="text-blue-600" tool="ME Encryption" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Encrypted" value={enc.encrypted.toLocaleString()} icon="🔐" accent="text-green-600" tool="ME Encryption" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Coverage" value={`${enc.pct}%`} icon="✅" accent="text-green-600" tool="ME Encryption" toolColor="bg-purple-100 text-purple-700" />
-        <KPICard label="Critical Unencrypted" value={enc.unencryptedCritical} icon="🔴" accent="text-red-500" tool="ME Encryption" toolColor="bg-purple-100 text-purple-700" />
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <SectionCard title="Encryption Coverage by OS" tool="ME Asset Encryption" toolColor="bg-purple-100 text-purple-700">
-          <div className="space-y-4 mt-2">
-            {enc.byOS.map((os) => {
-              const pct = Math.round((os.encrypted/os.total)*100);
-              const unenc = os.total - os.encrypted;
-              return (
-                <div key={os.os}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-gray-600 font-medium">{os.os}</span>
-                    <span className="font-bold text-gray-700">{pct}% ({os.encrypted}/{os.total})</span>
-                  </div>
-                  <div className="flex h-6 rounded-lg overflow-hidden">
-                    <div className="flex items-center justify-center text-[10px] text-white font-bold bg-green-500" style={{ width:`${pct}%` }}>
-                      {pct>15?`${os.encrypted} 🔐`:""}
-                    </div>
-                    <div className="flex items-center justify-center text-[10px] text-white font-bold bg-red-400 flex-1">
-                      {unenc>0?`${unenc} ⚠️`:""}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </SectionCard>
-        <SectionCard title="Overall Encryption Status" tool="ME Asset Encryption" toolColor="bg-purple-100 text-purple-700">
-          <div className="flex items-center justify-around py-4">
-            <GaugeRing value={enc.pct} size={130} color="#8b5cf6" />
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="w-3 h-3 rounded bg-purple-500 flex-shrink-0" />
-                <span className="text-gray-600">Encrypted: <strong>{enc.encrypted.toLocaleString()}</strong></span>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="w-3 h-3 rounded bg-red-400 flex-shrink-0" />
-                <span className="text-gray-600">Unencrypted: <strong className="text-red-500">{(enc.total-enc.encrypted).toLocaleString()}</strong></span>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="w-3 h-3 rounded bg-orange-400 flex-shrink-0" />
-                <span className="text-gray-600">Critical unenc: <strong className="text-red-600">{enc.unencryptedCritical}</strong></span>
-              </div>
-              <div className="text-[10px] text-gray-400 mt-2 max-w-40 leading-tight">
-                BitLocker (Windows) · FileVault (macOS) · LUKS (Linux)
+              <div style={{ height:8, background:"#f1f5f9", borderRadius:4 }}>
+                <div style={{ height:"100%", width:`${c.score}%`, background:`linear-gradient(90deg,${c.score>=80?C.ok:c.score>=70?C.warn:C.critical}bb,${c.score>=80?C.ok:c.score>=70?C.warn:C.critical})`, borderRadius:4 }}/>
               </div>
             </div>
-          </div>
-        </SectionCard>
-      </div>
-    </div>
-  );
-}
-
-// ── APP SHELL ─────────────────────────────────────────────────────────────────
-const NAV = [
-  { icon:"🏠", label:"Overview" },
-  { icon:"🔥", label:"Firewall (FG + PA)" },
-  { icon:"🌐", label:"Attack Surface" },
-  { icon:"☁️", label:"Cloud Security" },
-  { icon:"🐛", label:"Vulnerabilities" },
-  { icon:"🖥️", label:"Assets & Patches" },
-  { icon:"🔐", label:"Encryption" },
-  { icon:"🚨", label:"Incidents" },
-  { icon:"📊", label:"Reports" },
-  { icon:"⚙️", label:"Settings" },
-];
-
-function Sidebar({ active, setActive }) {
-  return (
-    <div className="w-52 min-h-screen bg-[#0d1b2a] flex flex-col py-4 flex-shrink-0">
-      <div className="px-4 mb-5">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-2xl">🛡️</span>
-          <div>
-            <div className="text-white text-xs font-black tracking-wide">SECURITY</div>
-            <div className="text-blue-400 text-[10px] font-bold tracking-widest">OPERATIONS</div>
-          </div>
-        </div>
-        <div className="text-[9px] text-gray-500 mt-1 leading-tight">
-          Fortinet · PaloAlto · UpGuard<br />Azure · Qualys · ManageEngine
-        </div>
-      </div>
-      <nav className="flex-1">
-        {NAV.map((item) => (
-          <button key={item.label} onClick={() => setActive(item.label)}
-            className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-all ${
-              active===item.label
-                ? "bg-blue-600 text-white font-semibold border-r-2 border-blue-300"
-                : "text-gray-400 hover:bg-[#1a2d45] hover:text-white"
-            }`}>
-            <span>{item.icon}</span><span className="text-xs">{item.label}</span>
-          </button>
-        ))}
-      </nav>
-      <div className="px-4 pb-2">
-        <div className="text-[9px] text-gray-600 text-center">
-          {Object.values(CONFIG).some(c=>Object.values(c).some(v=>v))?"🟢 APIs Connected":"🟡 Demo Mode"}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  INTEGRATIONS / SETTINGS PAGE                                           ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-const INTEGRATIONS_DEF = [
-  {
-    key: "fortinet",
-    name: "Fortinet FortiGate",
-    icon: "🔥",
-    color: "border-red-500",
-    badge: "bg-red-100 text-red-700",
-    desc: "Next-gen firewall — threat stats, blocked IPs, interface health",
-    docs: "https://fndn.fortinet.net/",
-    fields: [
-      { id: "fortinet_host",   label: "FortiGate URL",  type: "text",     placeholder: "https://192.168.1.1",     hint: "Base URL of your FortiGate management interface" },
-      { id: "fortinet_apikey", label: "REST API Token",  type: "password", placeholder: "API token from admin account", hint: "FortiGate → System → Administrators → API Users" },
-    ],
-  },
-  {
-    key: "paloalto",
-    name: "Palo Alto (Panorama)",
-    icon: "🌐",
-    color: "border-orange-500",
-    badge: "bg-orange-100 text-orange-700",
-    desc: "Panorama / standalone NGFW — threat intelligence, policy hits",
-    docs: "https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-panorama-api",
-    fields: [
-      { id: "paloalto_host",   label: "Panorama URL",   type: "text",     placeholder: "https://panorama.company.com", hint: "Panorama or standalone firewall URL" },
-      { id: "paloalto_apikey", label: "PAN-OS API Key",  type: "password", placeholder: "API key", hint: "Generate: https://<device>/api/?type=keygen&user=X&password=Y" },
-    ],
-  },
-  {
-    key: "upguard",
-    name: "UpGuard Cyber Risk",
-    icon: "🛡️",
-    color: "border-teal-500",
-    badge: "bg-teal-100 text-teal-700",
-    desc: "External attack surface monitoring — risk score, open ports, vulnerabilities",
-    docs: "https://cyber-risk.upguard.com/api/v2/",
-    fields: [
-      { id: "upguard_apikey", label: "API Key", type: "password", placeholder: "UpGuard API key", hint: "Settings → API Keys in your UpGuard portal" },
-    ],
-  },
-  {
-    key: "azure",
-    name: "Azure Defender for Cloud",
-    icon: "☁️",
-    color: "border-blue-500",
-    badge: "bg-blue-100 text-blue-700",
-    desc: "Cloud security posture — secure score, alerts, compliance",
-    docs: "https://docs.microsoft.com/en-us/rest/api/defenderforcloud/",
-    fields: [
-      { id: "azure_tenant_id",       label: "Tenant ID",       type: "text",     placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", hint: "Azure AD → Overview → Tenant ID" },
-      { id: "azure_client_id",       label: "Client ID",       type: "text",     placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", hint: "App Registration → Application (client) ID" },
-      { id: "azure_client_secret",   label: "Client Secret",   type: "password", placeholder: "Secret value",                         hint: "App Registration → Certificates & Secrets → New client secret" },
-      { id: "azure_subscription_id", label: "Subscription ID", type: "text",     placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", hint: "Subscriptions → Your subscription ID" },
-    ],
-  },
-  {
-    key: "qualys",
-    name: "Qualys VMDR / VAPT",
-    icon: "🐛",
-    color: "border-yellow-500",
-    badge: "bg-yellow-100 text-yellow-700",
-    desc: "Vulnerability management — open CVEs, severity breakdown, scan history",
-    docs: "https://www.qualys.com/docs/qualys-api-vmpc-user-guide.pdf",
-    fields: [
-      { id: "qualys_username", label: "Username", type: "text",     placeholder: "qualys-reader@company.com", hint: "Dedicated reader account (API access must be enabled)" },
-      { id: "qualys_password", label: "Password", type: "password", placeholder: "Password",                  hint: "Qualys → Users → Edit → Enable API Access" },
-    ],
-  },
-  {
-    key: "manageengine",
-    name: "ManageEngine",
-    icon: "🖥️",
-    color: "border-purple-500",
-    badge: "bg-purple-100 text-purple-700",
-    desc: "Asset inventory, patch compliance, endpoint encryption status",
-    docs: "https://www.manageengine.com/patch-management/api/",
-    fields: [
-      { id: "me_host",   label: "Server URL",    type: "text",     placeholder: "https://meserver.company.com:8443", hint: "ManageEngine Endpoint Central / Patch Manager host" },
-      { id: "me_apikey", label: "OAuth2 Token",  type: "password", placeholder: "Zoho OAuth token",                  hint: "ME Portal → Admin → API Explorer → Generate Token" },
-    ],
-  },
-  {
-    key: "taegis",
-    name: "Secureworks Taegis XDR",
-    icon: "🔍",
-    color: "border-indigo-500",
-    badge: "bg-indigo-100 text-indigo-700",
-    desc: "SIEM / XDR — alerts, investigations, threat detections",
-    docs: "https://docs.ctpx.secureworks.com/apis/",
-    fields: [
-      { id: "taegis_client_id",     label: "Client ID",      type: "text",     placeholder: "Taegis API client ID",     hint: "Taegis XDR → Settings → API Credentials → Create" },
-      { id: "taegis_client_secret", label: "Client Secret",  type: "password", placeholder: "Taegis API client secret", hint: "Copy secret immediately after creation" },
-      { id: "taegis_region",        label: "Region",         type: "select",   options: ["us1","us2","eu","jp"],         hint: "Your Taegis tenant region" },
-    ],
-  },
-];
-
-function StatusBadge({ configured, tested, dbStatus }) {
-  if (!configured) return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Not Configured</span>;
-  if (tested === "ok" || dbStatus === "ok")    return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✓ Connected</span>;
-  if (tested === "error" || dbStatus === "error") return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">✗ Error</span>;
-  return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">⚙ Configured</span>;
-}
-
-const API = process.env.REACT_APP_API_BASE_URL || "http://localhost:4000";
-
-function IntegrationCard({ def, status, onUpdate }) {
-  const [open, setOpen] = useState(false);
-  const [values, setValues] = useState(() => {
-    const v = {};
-    def.fields.forEach(f => { v[f.id] = ""; });
-    return v;
-  });
-  const [testState, setTestState] = useState(null);
-  const [saveMsg, setSaveMsg] = useState("");
-  const configured = status?.configured || false;
-
-  // Map flat field IDs to nested credential object
-  function buildCreds() {
-    const creds = {};
-    def.fields.forEach(f => { if (values[f.id]) creds[f.id] = values[f.id]; });
-    return creds;
-  }
-
-  async function handleSave() {
-    setSaveMsg("Saving…");
-    try {
-      const r = await fetch(`${API}/api/integrations/${def.key}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildCreds()),
-      });
-      if (r.ok) { setSaveMsg("✓ Saved!"); onUpdate(); setOpen(false); }
-      else setSaveMsg("Error saving");
-    } catch { setSaveMsg("Error saving"); }
-    setTimeout(() => setSaveMsg(""), 3000);
-  }
-
-  async function handleTest() {
-    setTestState("testing");
-    try {
-      const r = await fetch(`${API}/api/integrations/${def.key}/test`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildCreds()),
-      });
-      const j = await r.json();
-      setTestState(j.ok ? "ok" : "error");
-    } catch { setTestState("error"); }
-    setTimeout(() => setTestState(null), 6000);
-  }
-
-  async function handleClear() {
-    await fetch(`${API}/api/integrations/${def.key}`, { method: "DELETE" });
-    onUpdate();
-  }
-
-  return (
-    <div className={`bg-white rounded-xl border-l-4 ${def.color} shadow-sm overflow-hidden`}>
-      <div className="px-5 py-4 flex items-center justify-between cursor-pointer hover:bg-gray-50 transition-colors" onClick={() => setOpen(o => !o)}>
-        <div className="flex items-center gap-3">
-          <span className="text-2xl">{def.icon}</span>
-          <div>
-            <div className="font-semibold text-gray-800 text-sm">{def.name}</div>
-            <div className="text-xs text-gray-500 mt-0.5">{def.desc}</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <StatusBadge configured={configured} tested={testState} dbStatus={status?.status} />
-          {configured && <button onClick={e=>{e.stopPropagation();handleClear();}} className="text-xs text-red-400 hover:text-red-600">Remove</button>}
-          <span className="text-gray-400 text-sm">{open ? "▲" : "▼"}</span>
-        </div>
-      </div>
-
-      {open && (
-        <div className="px-5 pb-5 border-t border-gray-100 pt-4">
-          {configured && <div className="mb-3 text-xs text-green-700 bg-green-50 rounded-lg px-3 py-2">✓ Credentials saved in database. Enter new values below to update.</div>}
-          <div className="grid grid-cols-1 gap-3 mb-4">
-            {def.fields.map(field => (
-              <div key={field.id}>
-                <label className="block text-xs font-semibold text-gray-600 mb-1">{field.label}</label>
-                {field.type === "select" ? (
-                  <select value={values[field.id]} onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
-                    {(field.options || []).map(o => <option key={o} value={o}>{o}</option>)}
-                  </select>
-                ) : (
-                  <input type={field.type} value={values[field.id]}
-                    onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
-                    placeholder={configured ? "••••••• (saved — enter new value to update)" : field.placeholder}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono" />
-                )}
-                {field.hint && <p className="text-xs text-gray-400 mt-1">💡 {field.hint}</p>}
+          ))}
+        </Card>
+        <Card style={{ padding:24 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Resource Coverage</div>
+          <ResponsiveContainer width="100%" height={200}>
+            <PieChart>
+              <Pie data={[{name:"Protected",value:94},{name:"Unprotected",value:6}]}
+                cx="50%" cy="50%" innerRadius={55} outerRadius={80}
+                paddingAngle={3} dataKey="value">
+                <Cell fill={C.ok}/><Cell fill="#f1f5f9"/>
+              </Pie>
+              <Tooltip contentStyle={{borderRadius:8,fontSize:12}}/>
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12 }}>
+            {[
+              {label:"Virtual Machines",total:45,prot:42},{label:"Storage Accounts",total:23,prot:23},
+              {label:"Databases",total:12,prot:11},{label:"App Services",total:18,prot:15},
+              {label:"Kubernetes",total:4,prot:3},
+            ].map(r=>(
+              <div key={r.label} style={{ display:"flex", justifyContent:"space-between", padding:"5px 0" }}>
+                <span style={{ fontSize:12, color:C.text }}>{r.label}</span>
+                <span style={{ fontSize:12, color:r.prot===r.total?C.ok:C.warn, fontWeight:600 }}>{r.prot}/{r.total}</span>
               </div>
             ))}
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <button onClick={handleSave} className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors">
-              {saveMsg || "Save to Database"}
-            </button>
-            <button onClick={handleTest} disabled={testState === "testing"}
-              className="px-4 py-2 border border-gray-300 text-gray-600 text-sm font-semibold rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40">
-              {testState === "testing" ? "Testing…" : testState === "ok" ? "✓ Connected" : testState === "error" ? "✗ Failed" : "Test Connection"}
-            </button>
-            {status?.last_error && <span className="text-xs text-red-500">Last error: {status.last_error}</span>}
-            <a href={def.docs} target="_blank" rel="noreferrer" className="text-xs text-blue-500 hover:underline ml-auto">📖 API Docs</a>
-          </div>
-          {status?.last_tested && <p className="text-xs text-gray-400 mt-2">Last tested: {new Date(status.last_tested).toLocaleString()}</p>}
-        </div>
-      )}
+        </Card>
+      </div>
     </div>
   );
 }
 
+// ── Executive Report ─────────────────────────────────────────────────────────
+function ReportPage({ data }) {
+  const d = data || buildMock();
+  const avgCompliance = d.compliance ? Math.round(d.compliance.reduce((s,c)=>s+c.score,0)/d.compliance.length) : 82;
+  const critAlerts = d.alerts.filter(a=>a.severity==="Critical").length;
+  const openVulns = d.vulnerabilities?.filter(v=>v.status!=="Resolved").length || 0;
+  return (
+    <div>
+      <SectionTitle title="Executive Security Report"
+        subtitle={`Prepared for Board Review – ${new Date().toLocaleDateString("en-AU",{year:"numeric",month:"long"})}`}
+        action={<button onClick={()=>window.print()} style={{ background:C.primary, color:"white", border:"none", borderRadius:8, padding:"8px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>🖨️ Print / Export PDF</button>}/>
+      <Card style={{ padding:36, maxWidth:800, margin:"0 auto" }}>
+        {/* Letterhead */}
+        <div style={{ borderBottom:`3px solid ${C.primary}`, paddingBottom:20, marginBottom:24, display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
+          <div>
+            <div style={{ fontSize:22, fontWeight:800, color:C.text }}>Security Operations Report</div>
+            <div style={{ fontSize:14, color:C.muted, marginTop:4 }}>{new Date().toLocaleDateString("en-AU",{weekday:"long",year:"numeric",month:"long",day:"numeric"})}</div>
+          </div>
+          <div style={{ fontSize:32 }}>🛡️</div>
+        </div>
+
+        {/* Executive Summary */}
+        <div style={{ background:"#eff6ff", borderRadius:10, padding:20, marginBottom:24, borderLeft:`4px solid ${C.primary}` }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.primary, marginBottom:8 }}>Executive Summary</div>
+          <div style={{ fontSize:13, color:C.text, lineHeight:1.8 }}>
+            The organisation's overall security posture is rated <strong>MODERATE</strong> with a health score of <strong>{d.score}/100</strong>.
+            {" "}The security programme has improved by 3 points over the past month. There are currently <strong>{critAlerts} critical</strong> and{" "}
+            <strong>{d.alerts.filter(a=>a.severity==="High").length} high</strong> severity alerts requiring attention, and <strong>{openVulns} open vulnerabilities</strong>{" "}
+            across the environment. Average compliance posture across all frameworks stands at <strong>{avgCompliance}%</strong>.
+          </div>
+        </div>
+
+        {/* Metrics table */}
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Key Performance Indicators</div>
+        <table style={{ width:"100%", borderCollapse:"collapse", marginBottom:24 }}>
+          <thead><tr style={{ background:"#f8fafc" }}>
+            {["Metric","Current","Target","Status"].map(h=>(
+              <th key={h} style={{ padding:"10px 16px", textAlign:"left", fontSize:12, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`2px solid ${C.border}` }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {[
+              {metric:"Security Health Score", current:`${d.score}/100`, target:"≥80/100", ok:d.score>=80},
+              {metric:"Critical Alerts (Open)", current:critAlerts, target:"0", ok:critAlerts===0},
+              {metric:"Mean Time to Detect", current:"4.2 min", target:"<5 min", ok:true},
+              {metric:"Patch Compliance", current:`${d.assets?.patchedPct||72}%`, target:"≥95%", ok:(d.assets?.patchedPct||72)>=95},
+              {metric:"Avg Compliance Score", current:`${avgCompliance}%`, target:"≥85%", ok:avgCompliance>=85},
+              {metric:"Endpoint Encryption", current:`${d.assets?.encryptedPct||85}%`, target:"100%", ok:(d.assets?.encryptedPct||85)>=100},
+            ].map(r=>(
+              <tr key={r.metric} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 16px", fontSize:13, color:C.text, fontWeight:500 }}>{r.metric}</td>
+                <td style={{ padding:"10px 16px", fontSize:13, fontWeight:700, color:C.text }}>{r.current}</td>
+                <td style={{ padding:"10px 16px", fontSize:13, color:C.muted }}>{r.target}</td>
+                <td style={{ padding:"10px 16px" }}>
+                  <span style={{ fontSize:12, fontWeight:600, color:r.ok?C.ok:C.critical }}>{r.ok?"✅ On Target":"⚠️ Below Target"}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {/* Recommendations */}
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Board Recommendations</div>
+        {[
+          { n:1, text:"Approve emergency patching window for critical CVEs on 14 affected hosts. Risk of ransomware exploitation is HIGH without immediate action." },
+          { n:2, text:"Mandate MFA enforcement across all privileged accounts within 30 days. Current coverage of 63% fails Essential Eight compliance." },
+          { n:3, text:"Fund dedicated Vulnerability Management programme to close patch cycle gap and reach <5% non-compliant endpoints." },
+          { n:4, text:"Review and approve updated Incident Response Plan incorporating ransomware-specific playbooks." },
+        ].map(r=>(
+          <div key={r.n} style={{ display:"flex", gap:12, marginBottom:12, padding:14, background:"#f8fafc", borderRadius:8 }}>
+            <div style={{ width:24, height:24, background:C.primary, borderRadius:"50%", color:"white", fontSize:11, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>{r.n}</div>
+            <div style={{ fontSize:13, color:C.text, lineHeight:1.6 }}>{r.text}</div>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANALYST PAGES
+═══════════════════════════════════════════════════════════════════════════ */
+
+// ── Alert Queue ──────────────────────────────────────────────────────────────
+function AlertsPage({ data }) {
+  const d = data || buildMock();
+  const [filter, setFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [toolFilter, setToolFilter] = useState("All");
+  const severities = ["All","Critical","High","Medium","Low"];
+  const filtered = d.alerts.filter(a=>
+    (filter==="All"||a.severity===filter) &&
+    (toolFilter==="All"||a.tool===toolFilter) &&
+    (search===""||a.title.toLowerCase().includes(search.toLowerCase())||a.resource.toLowerCase().includes(search.toLowerCase()))
+  );
+  const counts = {};
+  d.alerts.forEach(a=>{ counts[a.severity]=(counts[a.severity]||0)+1; });
+  return (
+    <div>
+      <SectionTitle title="Alert Queue" subtitle="Real-time alerts from all connected security tools" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12, marginBottom:20 }}>
+        {severities.map(s=>(
+          <button key={s} onClick={()=>setFilter(s)}
+            style={{ padding:"10px 6px", borderRadius:8, border:`2px solid ${filter===s?(SEVERITY_COLORS[s]||C.primary):C.border}`,
+              background:filter===s?`${SEVERITY_COLORS[s]||C.primary}12`:"white", cursor:"pointer", textAlign:"center" }}>
+            <div style={{ fontSize:18, fontWeight:800, color:SEVERITY_COLORS[s]||C.text }}>{s==="All"?d.alerts.length:counts[s]||0}</div>
+            <div style={{ fontSize:10, fontWeight:600, color:C.muted, textTransform:"uppercase", letterSpacing:0.5 }}>{s}</div>
+          </button>
+        ))}
+      </div>
+      <Card style={{ padding:20 }}>
+        <div style={{ display:"flex", gap:12, marginBottom:16 }}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search alerts..."
+            style={{ flex:1, padding:"8px 14px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none" }}/>
+          <select value={toolFilter} onChange={e=>setToolFilter(e.target.value)}
+            style={{ padding:"8px 14px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none", background:"white" }}>
+            <option value="All">All Tools</option>
+            {TOOLS.map(t=><option key={t.key} value={t.key}>{t.name}</option>)}
+          </select>
+        </div>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead><tr style={{ background:"#f8fafc" }}>
+            {["Severity","Title","Tool","Resource","Time","Status"].map(h=>(
+              <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`2px solid ${C.border}` }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {filtered.map(a=>(
+              <tr key={a.id} style={{ borderBottom:`1px solid ${C.border}`, background:a.severity==="Critical"?"#fef2f220":"transparent" }}>
+                <td style={{ padding:"12px 12px" }}><SeverityBadge level={a.severity}/></td>
+                <td style={{ padding:"12px 12px", fontSize:13, color:C.text, fontWeight:500 }}>{a.title}</td>
+                <td style={{ padding:"12px 12px" }}>
+                  <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:12 }}>
+                    <span>{TOOLS.find(t=>t.key===a.tool)?.icon}</span>
+                    <span style={{ color:C.muted }}>{TOOLS.find(t=>t.key===a.tool)?.name}</span>
+                  </span>
+                </td>
+                <td style={{ padding:"12px 12px", fontSize:12, fontFamily:"monospace", color:C.muted }}>{a.resource}</td>
+                <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{a.time}</td>
+                <td style={{ padding:"12px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:600, padding:"3px 10px", borderRadius:20,
+                    background:a.status==="Open"?"#fef2f2":a.status==="Resolved"?"#f0fdf4":"#fffbeb",
+                    color:a.status==="Open"?C.critical:a.status==="Resolved"?C.ok:C.warn }}>{a.status}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filtered.length===0&&<div style={{ textAlign:"center", padding:32, color:C.muted, fontSize:13 }}>No alerts match current filters</div>}
+      </Card>
+    </div>
+  );
+}
+
+// ── Vulnerability Deep Dive ──────────────────────────────────────────────────
+function VulnerabilitiesPage({ data }) {
+  const d = data || buildMock();
+  const [sort, setSort] = useState("cvss");
+  const vulns = [...(d.vulnerabilities||[])].sort((a,b)=> sort==="cvss"?b.cvss-a.cvss:sort==="age"?b.age-a.age:b.affected-a.affected);
+  const bySev = {};
+  (d.vulnerabilities||[]).forEach(v=>{ bySev[v.severity]=(bySev[v.severity]||0)+1; });
+  const pieData = Object.entries(bySev).map(([k,v])=>({name:k,value:v,color:SEVERITY_COLORS[k]}));
+  return (
+    <div>
+      <SectionTitle title="Vulnerability Management – Qualys VMDR" subtitle="Detailed vulnerability findings, CVE analysis and remediation tracking" />
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 240px", gap:16, marginBottom:24 }}>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Vulnerability Distribution</div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+            {["Critical","High","Medium","Low"].map(s=>(
+              <div key={s} style={{ textAlign:"center", padding:16, borderRadius:10, background:`${SEVERITY_COLORS[s]}10`, border:`1px solid ${SEVERITY_COLORS[s]}30` }}>
+                <div style={{ fontSize:28, fontWeight:800, color:SEVERITY_COLORS[s] }}>{bySev[s]||0}</div>
+                <div style={{ fontSize:11, color:C.muted, marginTop:4 }}>{s}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:8 }}>By Severity</div>
+          <ResponsiveContainer width="100%" height={160}>
+            <PieChart><Pie data={pieData} cx="50%" cy="50%" outerRadius={65} dataKey="value">
+              {pieData.map((e,i)=><Cell key={i} fill={e.color}/>)}
+            </Pie>
+            <Tooltip contentStyle={{borderRadius:8,fontSize:12}}/></PieChart>
+          </ResponsiveContainer>
+        </Card>
+      </div>
+      <Card style={{ padding:20 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text }}>CVE Detail – Prioritised Remediation List</div>
+          <div style={{ display:"flex", gap:8 }}>
+            {[["cvss","By CVSS"],["affected","By Hosts Affected"],["age","By Age"]].map(([v,l])=>(
+              <button key={v} onClick={()=>setSort(v)}
+                style={{ padding:"6px 14px", borderRadius:6, border:`1px solid ${sort===v?C.primary:C.border}`,
+                  background:sort===v?`${C.primary}12`:"white", color:sort===v?C.primary:C.muted, fontSize:12, cursor:"pointer", fontWeight:600 }}>{l}</button>
+            ))}
+          </div>
+        </div>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead><tr style={{ background:"#f8fafc" }}>
+            {["CVE","Severity","CVSS","Title","Affected Hosts","Age (days)","Status"].map(h=>(
+              <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`2px solid ${C.border}` }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {vulns.map(v=>(
+              <tr key={v.id} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:12, fontWeight:700, color:C.primary }}>{v.cve}</td>
+                <td style={{ padding:"12px 12px" }}><SeverityBadge level={v.severity}/></td>
+                <td style={{ padding:"12px 12px" }}>
+                  <span style={{ fontSize:14, fontWeight:800, color:v.cvss>=9?C.critical:v.cvss>=7?C.high:C.medium }}>{v.cvss}</span>
+                </td>
+                <td style={{ padding:"12px 12px", fontSize:12, color:C.text }}>{v.title}</td>
+                <td style={{ padding:"12px 12px", fontSize:13, fontWeight:700, color:C.text, textAlign:"center" }}>{v.affected}</td>
+                <td style={{ padding:"12px 12px", fontSize:12, color:v.age>30?C.critical:v.age>14?C.warn:C.muted, fontWeight:v.age>14?700:400 }}>{v.age}d</td>
+                <td style={{ padding:"12px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:600, padding:"3px 10px", borderRadius:20,
+                    background:v.status==="Unpatched"?"#fef2f2":v.status==="In Progress"?"#fffbeb":"#f0fdf4",
+                    color:v.status==="Unpatched"?C.critical:v.status==="In Progress"?C.warn:C.ok }}>{v.status}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+// ── Firewall Analytics ───────────────────────────────────────────────────────
+function FirewallPage({ data }) {
+  const d = data || buildMock();
+  return (
+    <div>
+      <SectionTitle title="Firewall Analytics – Fortinet & Palo Alto" subtitle="Traffic analysis, policy hits and threat blocking statistics" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        <MetricCard icon="🚫" label="Blocked Today" value={(d.firewall?.blockedToday||12847).toLocaleString()} sub="Malicious connections" color={C.critical}/>
+        <MetricCard icon="✅" label="Allowed Today" value={(d.firewall?.allowedToday||184293).toLocaleString()} sub="Legitimate traffic" color={C.ok}/>
+        <MetricCard icon="📊" label="Block Rate" value={`${Math.round(d.firewall?.blockedToday/(d.firewall?.blockedToday+d.firewall?.allowedToday)*100)||6.5}%`} sub="Of total traffic" color={C.primaryLight}/>
+        <MetricCard icon="⚡" label="IPS Signatures" value="47,231" sub="Active threat signatures" color={C.primary}/>
+      </div>
+      <Card style={{ padding:20, marginBottom:16 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Traffic Volume – Last 24 Hours</div>
+        <ResponsiveContainer width="100%" height={220}>
+          <AreaChart data={d.firewall?.trafficByHour||[]} margin={{top:5,right:10,left:-10,bottom:0}}>
+            <defs>
+              <linearGradient id="blockGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={C.critical} stopOpacity={0.3}/><stop offset="95%" stopColor={C.critical} stopOpacity={0}/>
+              </linearGradient>
+              <linearGradient id="allowGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={C.ok} stopOpacity={0.3}/><stop offset="95%" stopColor={C.ok} stopOpacity={0}/>
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
+            <XAxis dataKey="hour" tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false} interval={3}/>
+            <YAxis tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}/>
+            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}/>
+            <Legend iconType="circle" wrapperStyle={{fontSize:12}}/>
+            <Area type="monotone" dataKey="allowed" name="Allowed" stroke={C.ok} fill="url(#allowGrad)" strokeWidth={2}/>
+            <Area type="monotone" dataKey="blocked" name="Blocked" stroke={C.critical} fill="url(#blockGrad)" strokeWidth={2}/>
+          </AreaChart>
+        </ResponsiveContainer>
+      </Card>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Firewall Policy Hits</div>
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead><tr><th style={{ padding:"8px 10px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Policy</th>
+              <th style={{ padding:"8px 10px", textAlign:"right", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Hits</th>
+              <th style={{ padding:"8px 10px", textAlign:"center", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Action</th>
+            </tr></thead>
+            <tbody>{d.firewall?.topPolicies?.map((p,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 10px", fontSize:12, color:C.text }}>{p.name}</td>
+                <td style={{ padding:"10px 10px", fontSize:13, fontWeight:700, color:C.text, textAlign:"right" }}>{p.hits.toLocaleString()}</td>
+                <td style={{ padding:"10px 10px", textAlign:"center" }}>
+                  <span style={{ fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:10,
+                    background:p.action==="Allow"?"#f0fdf4":"#fef2f2", color:p.action==="Allow"?C.ok:C.critical }}>{p.action}</span>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Threat Source Countries</div>
+          {d.firewall?.topThreatCountries?.map((c,i)=>(
+            <div key={c.country} style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
+              <div style={{ width:28, height:28, background:`${C.critical}15`, borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:C.critical }}>{i+1}</div>
+              <div style={{ flex:1 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                  <span style={{ fontSize:12, fontWeight:600, color:C.text }}>{c.country}</span>
+                  <span style={{ fontSize:12, color:C.muted }}>{c.count.toLocaleString()}</span>
+                </div>
+                <div style={{ height:6, background:"#f1f5f9", borderRadius:3 }}>
+                  <div style={{ height:"100%", width:`${(c.count/d.firewall.topThreatCountries[0].count)*100}%`, background:`linear-gradient(90deg,${C.critical}aa,${C.critical})`, borderRadius:3 }}/>
+                </div>
+              </div>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ── Attack Surface ───────────────────────────────────────────────────────────
+function AttackSurfacePage({ data }) {
+  const d = data || buildMock();
+  const s = d.surface;
+  const gradeColor = s?.grade?.startsWith("A")?C.ok:s?.grade?.startsWith("B")?C.ok:s?.grade?.startsWith("C")?C.warn:C.critical;
+  return (
+    <div>
+      <SectionTitle title="Attack Surface – UpGuard" subtitle="External exposure monitoring, risk findings and brand protection" />
+      <div style={{ display:"grid", gridTemplateColumns:"200px 1fr", gap:16, marginBottom:24 }}>
+        <Card style={{ padding:24, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+          <div style={{ fontSize:72, fontWeight:900, color:gradeColor, lineHeight:1 }}>{s?.grade||"C+"}</div>
+          <div style={{ fontSize:14, color:C.muted, marginTop:8 }}>Surface Score</div>
+          <div style={{ fontSize:28, fontWeight:800, color:C.text, marginTop:4 }}>{s?.score||68}/100</div>
+        </Card>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+          {[
+            {icon:"🌐",label:"Domains",value:s?.domains||12},{icon:"🔗",label:"Subdomains",value:s?.subdomains||34},
+            {icon:"🔌",label:"Open Ports",value:s?.openPorts||18},{icon:"📡",label:"IP Ranges",value:s?.ipRanges||5},
+          ].map(m=>(
+            <Card key={m.label} style={{ padding:16, textAlign:"center" }}>
+              <div style={{ fontSize:24 }}>{m.icon}</div>
+              <div style={{ fontSize:24, fontWeight:800, color:C.text, marginTop:4 }}>{m.value}</div>
+              <div style={{ fontSize:11, color:C.muted }}>{m.label}</div>
+            </Card>
+          ))}
+        </div>
+      </div>
+      <Card style={{ padding:20 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>External Risk Findings</div>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead><tr style={{ background:"#f8fafc" }}>
+            {["Severity","Finding","Asset / Domain","First Detected"].map(h=>(
+              <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>{s?.findings?.map((f,i)=>(
+            <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+              <td style={{ padding:"12px 12px" }}><SeverityBadge level={f.severity}/></td>
+              <td style={{ padding:"12px 12px", fontSize:13, color:C.text }}>{f.title}</td>
+              <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:12, color:C.muted }}>{f.asset}</td>
+              <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{f.first}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+// ── Assets & Patches ─────────────────────────────────────────────────────────
+function AssetsPage({ data }) {
+  const d = data || buildMock();
+  const a = d.assets;
+  return (
+    <div>
+      <SectionTitle title="Assets & Patch Management – ManageEngine" subtitle="Asset inventory, patch compliance and disk encryption status" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        <MetricCard icon="💻" label="Total Assets" value={a?.total||342} sub={`${a?.online||298} online, ${a?.offline||44} offline`} color={C.primaryLight}/>
+        <MetricCard icon="🔄" label="Patch Compliance" value={`${a?.patchedPct||72}%`} sub="Target: 95%" trendUp={false} color={a?.patchedPct>=95?C.ok:C.warn}/>
+        <MetricCard icon="🔒" label="Disk Encryption" value={`${a?.encryptedPct||85}%`} sub="BitLocker / FileVault" trendUp={false} color={a?.encryptedPct>=95?C.ok:C.warn}/>
+        <MetricCard icon="⚠️" label="Non-compliant" value={Math.round((a?.total||342)*(1-(a?.patchedPct||72)/100))} sub="Missing critical patches" trendUp={false} color={C.high}/>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:16 }}>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Asset Types – Patch & Encryption Status</div>
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead><tr style={{ background:"#f8fafc" }}>
+              {["Type","Total","Patched","Encrypted"].map(h=>(
+                <th key={h} style={{ padding:"8px 12px", textAlign:h==="Type"?"left":"center", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>{a?.byType?.map(t=>(
+              <tr key={t.type} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:500, color:C.text }}>{t.type}</td>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:700, color:C.text, textAlign:"center" }}>{t.count}</td>
+                <td style={{ padding:"10px 12px", textAlign:"center" }}>
+                  <span style={{ fontSize:13, fontWeight:700, color:t.patched/t.count>=0.9?C.ok:C.warn }}>{t.patched}</span>
+                  <span style={{ fontSize:11, color:C.muted }}> / {t.count}</span>
+                </td>
+                <td style={{ padding:"10px 12px", textAlign:"center" }}>
+                  {t.encrypted > 0 ? (
+                    <><span style={{ fontSize:13, fontWeight:700, color:t.encrypted/t.count>=0.9?C.ok:C.warn }}>{t.encrypted}</span>
+                    <span style={{ fontSize:11, color:C.muted }}> / {t.count}</span></>
+                  ):<span style={{ fontSize:12, color:C.muted }}>N/A</span>}
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Recent Patch Deployments</div>
+          {a?.recentPatches?.map((p,i)=>(
+            <div key={i} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+              <div style={{ width:36, height:36, borderRadius:8, background:p.status==="Success"?"#f0fdf4":p.status==="Partial"?"#fffbeb":"#fef2f2", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>
+                {p.status==="Success"?"✅":p.status==="Partial"?"⚠️":"❌"}
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:500, color:C.text }}>{p.name}</div>
+                <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>{p.date} • {p.devices} devices</div>
+              </div>
+              <span style={{ fontSize:11, fontWeight:600, color:p.status==="Success"?C.ok:p.status==="Partial"?C.warn:C.critical }}>{p.status}</span>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ── SIEM / XDR ───────────────────────────────────────────────────────────────
+function SIEMPage({ data }) {
+  const d = data || buildMock();
+  const [invOpen, setInvOpen] = useState(null);
+  return (
+    <div>
+      <SectionTitle title="SIEM / XDR – Taegis" subtitle="Security events, correlation alerts and active investigation queue" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        <MetricCard icon="📡" label="Events Today" value={(d.siem?.eventsToday||284710).toLocaleString()} color={C.primaryLight}/>
+        <MetricCard icon="🚨" label="Active Incidents" value={d.siem?.activeIncidents||3} trendUp={false} color={C.critical}/>
+        <MetricCard icon="⏱" label="MTTD" value={d.siem?.meanDetect||"4.2 min"} sub="Mean Time to Detect" trendUp={true} color={C.ok}/>
+        <MetricCard icon="🔬" label="Correlation Rules" value="1,247" sub="Active detection rules" color={C.primary}/>
+      </div>
+      <Card style={{ padding:20 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Investigation Queue</div>
+        {d.siem?.events?.map((e,i)=>(
+          <div key={i} onClick={()=>setInvOpen(invOpen===i?null:i)}
+            style={{ borderBottom:`1px solid ${C.border}`, cursor:"pointer" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12, padding:"14px 0" }}>
+              <div style={{ width:10, height:10, borderRadius:"50%", background:SEVERITY_COLORS[e.severity], flexShrink:0 }}/>
+              <div style={{ flex:1 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:3 }}>
+                  <span style={{ fontSize:11, fontFamily:"monospace", color:C.muted }}>{e.time}</span>
+                  <SeverityBadge level={e.severity}/>
+                  <span style={{ fontSize:12, fontWeight:600, color:C.text }}>{e.type}</span>
+                </div>
+                <div style={{ fontSize:13, color:C.text }}>{e.desc}</div>
+                <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>Source: {e.src}</div>
+              </div>
+              <span style={{ fontSize:11, fontWeight:600, padding:"4px 12px", borderRadius:20,
+                background:e.status==="Active"?"#fef2f2":e.status==="Contained"?"#f0fdf4":"#fffbeb",
+                color:e.status==="Active"?C.critical:e.status==="Contained"?C.ok:C.warn }}>{e.status}</span>
+              <span style={{ color:C.muted, fontSize:14 }}>{invOpen===i?"▲":"▼"}</span>
+            </div>
+            {invOpen===i&&(
+              <div style={{ background:"#f8fafc", borderRadius:8, padding:16, marginBottom:12 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:C.text, marginBottom:8 }}>Investigation Details</div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, fontSize:12, color:C.text }}>
+                  <div><span style={{ color:C.muted }}>Event Type:</span><br/><strong>{e.type}</strong></div>
+                  <div><span style={{ color:C.muted }}>Source IP:</span><br/><strong style={{ fontFamily:"monospace" }}>{e.src}</strong></div>
+                  <div><span style={{ color:C.muted }}>Status:</span><br/><strong style={{ color:e.status==="Active"?C.critical:C.ok }}>{e.status}</strong></div>
+                </div>
+                <div style={{ marginTop:12, display:"flex", gap:8 }}>
+                  <button style={{ padding:"6px 14px", borderRadius:6, border:`1px solid ${C.primary}`, background:"white", color:C.primary, fontSize:12, cursor:"pointer", fontWeight:600 }}>Assign to Me</button>
+                  <button style={{ padding:"6px 14px", borderRadius:6, border:`1px solid ${C.ok}`, background:"white", color:C.ok, fontSize:12, cursor:"pointer", fontWeight:600 }}>Mark Contained</button>
+                  <button style={{ padding:"6px 14px", borderRadius:6, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:12, cursor:"pointer" }}>Add Note</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SETTINGS – INTEGRATIONS
+═══════════════════════════════════════════════════════════════════════════ */
 function IntegrationsPage({ onSave }) {
   const [statuses, setStatuses] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => { loadStatuses(); }, []);
 
   async function loadStatuses() {
     try {
       const r = await fetch(`${API}/api/integrations`);
-      const rows = await r.json();
-      const map = {};
-      rows.forEach(row => { map[row.tool_name] = row; });
-      setStatuses(map);
-    } catch { /* backend not yet ready */ }
-    setLoading(false);
+      if (r.ok) {
+        const arr = await r.json();
+        const m = {};
+        arr.forEach(x => { m[x.tool_name] = x; });
+        setStatuses(m);
+      }
+    } catch(e) {
+      console.error("Could not load integration statuses:", e);
+    }
   }
 
-  useEffect(() => { loadStatuses(); }, []);
+  function showToast(msg, ok=true) {
+    setToast({msg, ok});
+    setTimeout(()=>setToast(null), 3000);
+  }
 
-  function handleUpdate() { loadStatuses(); onSave(); }
+  const FIELDS = {
+    fortinet:     [["host","Host URL","https://192.168.1.1"],["apikey","API Key","FortiGate REST API token"]],
+    paloalto:     [["host","Host / Panorama URL","https://panorama.company.com"],["apikey","API Key","PAN-OS API key"]],
+    upguard:      [["apikey","API Key","UpGuard API key"],["subdomain","Subdomain","company"]],
+    azure:        [["tenantId","Tenant ID","xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],["clientId","Client ID",""],["clientSecret","Client Secret",""],["subscriptionId","Subscription ID",""]],
+    qualys:       [["username","Username","qualys-reader@company.com"],["password","Password",""],["platform","Platform URL","https://qualysapi.qualys.com"]],
+    manageengine: [["host","Server URL","https://meserver:8443"],["apikey","API Key","Zoho OAuth token"]],
+    taegis:       [["clientId","Client ID",""],["clientSecret","Client Secret",""],["region","Region","us1"]],
+  };
 
-  const configuredCount = Object.values(statuses).filter(s => s.configured).length;
+  async function saveIntegration(toolKey) {
+    setSaving(true);
+    try {
+      const payload = { credentials: form, refresh_interval: form._interval || 300 };
+      delete payload.credentials._interval;
+      const r = await fetch(`${API}/api/integrations/${toolKey}`, {
+        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
+      });
+      if (r.ok) {
+        showToast("Credentials saved successfully");
+        setEditing(null);
+        loadStatuses();
+        if (onSave) onSave();
+      } else {
+        showToast("Failed to save credentials", false);
+      }
+    } catch(e) { showToast("Network error saving credentials", false); }
+    setSaving(false);
+  }
+
+  async function testConnection(toolKey) {
+    setTesting(toolKey);
+    try {
+      const r = await fetch(`${API}/api/integrations/${toolKey}/test`, { method:"POST" });
+      const data = await r.json();
+      showToast(data.success ? `${toolKey} connected successfully` : `Test failed: ${data.error}`, data.success);
+      loadStatuses();
+    } catch(e) { showToast("Connection test failed", false); }
+    setTesting(null);
+  }
+
+  async function deleteIntegration(toolKey) {
+    if (!confirm(`Remove credentials for ${toolKey}?`)) return;
+    await fetch(`${API}/api/integrations/${toolKey}`, { method:"DELETE" });
+    loadStatuses();
+    showToast("Credentials removed");
+  }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-4 pb-8">
-      <div className="bg-white rounded-xl shadow-sm p-5">
-        <div className="flex items-start justify-between">
-          <div>
-            <h2 className="text-lg font-bold text-gray-800">Integrations</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              Connect your security tools. Credentials are stored securely in the database and never sent to the browser.
-              Data refreshes every <strong>5 minutes</strong> automatically.
-            </p>
-            <div className="flex gap-3 mt-3 flex-wrap">
-              <span className="text-sm font-semibold text-blue-600">{configuredCount} / {INTEGRATIONS_DEF.length} configured</span>
-              {configuredCount === 0 && <span className="text-sm text-yellow-600">🟡 Demo mode</span>}
-              {configuredCount > 0 && <span className="text-sm text-green-600">🟢 Live data active</span>}
-            </div>
-          </div>
-          <button onClick={handleUpdate} className="text-xs text-blue-500 hover:text-blue-700 px-3 py-1.5 border border-blue-200 rounded-lg">↻ Refresh Status</button>
+    <div>
+      <SectionTitle title="Integrations & Settings" subtitle="Connect and configure your security tools. Credentials are stored securely in the database." />
+      {toast&&(
+        <div style={{ position:"fixed", bottom:24, right:24, background:toast.ok?C.ok:C.critical, color:"white", padding:"12px 20px", borderRadius:10, fontSize:13, fontWeight:600, boxShadow:"0 4px 20px rgba(0,0,0,0.2)", zIndex:1000 }}>
+          {toast.ok?"✅":"❌"} {toast.msg}
         </div>
-      </div>
-
-      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-        <h3 className="text-sm font-bold text-blue-800 mb-2">⚡ Quick Start</h3>
-        <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
-          <li>Click any integration card below to expand it</li>
-          <li>Enter your API credentials and click <strong>Save to Database</strong></li>
-          <li>Click <strong>Test Connection</strong> to verify — the backend fetches real data immediately</li>
-          <li>Dashboard auto-refreshes every 5 minutes with live data</li>
-        </ol>
-      </div>
-
-      {loading ? (
-        <div className="text-center text-gray-400 py-8">Loading integration status…</div>
-      ) : (
-        INTEGRATIONS_DEF.map(def => (
-          <IntegrationCard key={def.key} def={def} status={statuses[def.key]} onUpdate={handleUpdate} />
-        ))
       )}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:16 }}>
+        {TOOLS.map(tool => {
+          const st = statuses[tool.key] || {};
+          const isConfigured = st.status && st.status !== "unconfigured";
+          const isConnected = st.status === "connected";
+          const isEditing = editing === tool.key;
+          return (
+            <Card key={tool.key} style={{ padding:24, border: isConnected ? `2px solid ${C.ok}30` : `2px solid ${C.border}` }}>
+              <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:16 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ width:44, height:44, borderRadius:10, background:`${tool.color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:24 }}>{tool.icon}</div>
+                  <div>
+                    <div style={{ fontSize:15, fontWeight:700, color:C.text }}>{tool.name}</div>
+                    <div style={{ fontSize:11, color:C.muted }}>{tool.cat}</div>
+                  </div>
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <div style={{ width:8, height:8, borderRadius:"50%", background:isConnected?C.ok:isConfigured?C.warn:"#cbd5e1" }}/>
+                  <span style={{ fontSize:11, fontWeight:600, color:isConnected?C.ok:isConfigured?C.warn:C.muted }}>
+                    {isConnected?"Connected":isConfigured?`Status: ${st.status}`:"Not Configured"}
+                  </span>
+                </div>
+              </div>
+
+              {st.last_tested&&<div style={{ fontSize:11, color:C.muted, marginBottom:12 }}>Last tested: {new Date(st.last_tested).toLocaleString()}</div>}
+              {st.last_error&&<div style={{ fontSize:11, color:C.critical, marginBottom:12, background:"#fef2f2", padding:"6px 10px", borderRadius:6 }}>⚠️ {st.last_error}</div>}
+
+              {isEditing ? (
+                <div>
+                  {(FIELDS[tool.key]||[]).map(([field, label, placeholder])=>(
+                    <div key={field} style={{ marginBottom:12 }}>
+                      <label style={{ display:"block", fontSize:12, fontWeight:600, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>{label}</label>
+                      <input type={field.toLowerCase().includes("pass")||field.toLowerCase().includes("secret")||field.toLowerCase().includes("key")?"password":"text"}
+                        value={form[field]||""} onChange={e=>setForm(p=>({...p,[field]:e.target.value}))}
+                        placeholder={placeholder}
+                        style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none", boxSizing:"border-box" }}/>
+                    </div>
+                  ))}
+                  <div style={{ marginBottom:12 }}>
+                    <label style={{ display:"block", fontSize:12, fontWeight:600, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>Refresh Interval</label>
+                    <select value={form._interval||300} onChange={e=>setForm(p=>({...p,_interval:parseInt(e.target.value)}))}
+                      style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, background:"white" }}>
+                      {INTERVALS.map(i=><option key={i.value} value={i.value}>Every {i.label}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <button onClick={()=>saveIntegration(tool.key)} disabled={saving}
+                      style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background:tool.color, color:"white", fontSize:13, fontWeight:700, cursor:"pointer" }}>
+                      {saving?"Saving…":"💾 Save"}
+                    </button>
+                    <button onClick={()=>setEditing(null)} style={{ padding:"9px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                  <button onClick={()=>{ setEditing(tool.key); setForm({_interval:st.refresh_interval||300}); }}
+                    style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${tool.color}`, color:tool.color, background:`${tool.color}08`, fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                    ✏️ {isConfigured?"Edit":"Configure"}
+                  </button>
+                  {isConfigured&&<>
+                    <button onClick={()=>testConnection(tool.key)} disabled={testing===tool.key}
+                      style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`, color:C.text, background:"white", fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                      {testing===tool.key?"Testing…":"🔗 Test"}
+                    </button>
+                    <button onClick={()=>deleteIntegration(tool.key)}
+                      style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`, color:C.critical, background:"white", fontSize:12, cursor:"pointer" }}>
+                      🗑️
+                    </button>
+                  </>}
+                </div>
+              )}
+            </Card>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-// Fetch all live data from backend snapshot endpoint
-async function fetchLiveData() {
-  try {
-    const API_URL = process.env.REACT_APP_API_BASE_URL || "http://localhost:4000";
-    const r = await fetch(`${API_URL}/api/snapshot`, { signal: AbortSignal.timeout(10000) });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch { return null; }
-}
-
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════════════════════════════════════════ */
 export default function CybersecurityDashboard() {
-  const [activeNav, setActiveNav] = useState("Overview");
-  const [loading, setLoading]     = useState(true);
-  const [data, setData]           = useState(null);
-  const [lastRefresh, setLastRefresh] = useState(null);
+  const [role, setRole] = useState("executive");
+  const [page, setPage] = useState("overview");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [dateRange, setDateRange] = useState({ from:"", to:"" });
 
-  const load = useCallback(async () => {
+  const execNav = [
+    { id:"overview", icon:"🏠", label:"Security Posture" },
+    { id:"risk",     icon:"⚠️", label:"Risk & Compliance" },
+    { id:"threats",  icon:"🎯", label:"Threat Intelligence" },
+    { id:"cloud",    icon:"☁️", label:"Cloud Security" },
+    { id:"report",   icon:"📊", label:"Executive Report" },
+  ];
+  const analystNav = [
+    { id:"alerts",  icon:"🚨", label:"Alert Queue" },
+    { id:"vulns",   icon:"🔍", label:"Vulnerabilities" },
+    { id:"firewall",icon:"🔥", label:"Firewall Analytics" },
+    { id:"surface", icon:"🌐", label:"Attack Surface" },
+    { id:"assets",  icon:"💻", label:"Assets & Patches" },
+    { id:"siem",    icon:"📡", label:"SIEM / XDR" },
+  ];
+  const nav = role === "executive" ? execNav : analystNav;
+
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const live = await fetchLiveData();
-      if (live && Object.keys(live).some(k => live[k])) {
-        const base = await loadAllData();
-        setData({ ...base, ...Object.fromEntries(Object.entries(live).filter(([,v]) => v)) });
-      } else {
-        setData(await loadAllData());
-      }
-      setLastRefresh(new Date());
-    } catch { setData(await loadAllData()); }
-    setLoading(false);
-  }, []);
+      const params = new URLSearchParams();
+      if (dateRange.from) params.append("from", dateRange.from);
+      if (dateRange.to)   params.append("to",   dateRange.to);
+      const res = await fetch(`${API}/api/snapshot?${params}`);
+      if (!res.ok) throw new Error("API error");
+      const d = await res.json();
+      setData(d.data || d);
+    } catch {
+      setData(buildMock());
+    } finally {
+      setLoading(false);
+      setLastUpdated(new Date());
+    }
+  }, [dateRange]);
 
   useEffect(() => {
-    load();
-    const id = setInterval(load, 5 * 60 * 1000); // auto-refresh every 5 min
-    return () => clearInterval(id);
-  }, [load]);
+    loadData();
+    const t = setInterval(loadData, 5 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [loadData]);
 
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-[#f0f4f8]">
-        <div className="text-center space-y-3">
-          <div className="text-6xl animate-spin">🛡️</div>
-          <p className="text-gray-600 font-semibold text-lg">Loading Security Operations…</p>
-          <div className="flex flex-wrap gap-1.5 justify-center text-[10px]">
-            {["Fortinet","Palo Alto","UpGuard","Azure Defender","Qualys","ManageEngine"].map((t) => (
-              <span key={t} className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">{t}</span>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
+  function renderPage() {
+    const p = { data, dateRange };
+    switch(page) {
+      case "overview": return <OverviewPage {...p}/>;
+      case "risk":     return <RiskCompliancePage {...p}/>;
+      case "threats":  return <ThreatPage {...p}/>;
+      case "cloud":    return <CloudPage {...p}/>;
+      case "report":   return <ReportPage {...p}/>;
+      case "alerts":   return <AlertsPage {...p}/>;
+      case "vulns":    return <VulnerabilitiesPage {...p}/>;
+      case "firewall": return <FirewallPage {...p}/>;
+      case "surface":  return <AttackSurfacePage {...p}/>;
+      case "assets":   return <AssetsPage {...p}/>;
+      case "siem":     return <SIEMPage {...p}/>;
+      case "settings": return <IntegrationsPage onSave={loadData}/>;
+      default:         return <OverviewPage {...p}/>;
+    }
   }
 
-  const PAGE = {
-    "Overview":           <OverviewPage d={data} />,
-    "Firewall (FG + PA)": <FirewallPage d={data} />,
-    "Attack Surface":     <AttackSurfacePage d={data} />,
-    "Cloud Security":     <CloudPage d={data} />,
-    "Vulnerabilities":    <VulnPage d={data} />,
-    "Assets & Patches":   <AssetsPage d={data} />,
-    "Encryption":         <EncryptionPage d={data} />,
-    "Settings":           <IntegrationsPage onSave={() => { CONFIG = loadSavedConfig(); load(); }} />,
-  };
-
   return (
-    <div className="flex h-screen overflow-hidden bg-[#f0f4f8] font-sans">
-      <Sidebar active={activeNav} setActive={setActiveNav} />
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="bg-white shadow-sm px-6 py-2.5 flex items-center justify-between flex-shrink-0">
+    <div style={{ display:"flex", flexDirection:"column", height:"100vh",
+      fontFamily:"'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+      background:C.bg, color:C.text }}>
+
+      {/* ── HEADER ────────────────────────────────────────────────────────── */}
+      <header style={{ background:C.header, color:"white", padding:"0 24px", height:60,
+        display:"flex", alignItems:"center", gap:20, zIndex:10, boxShadow:"0 2px 12px rgba(0,0,0,0.25)", flexShrink:0 }}>
+
+        {/* Logo */}
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginRight:"auto" }}>
+          <div style={{ width:34, height:34, background:"linear-gradient(135deg,#3b82f6,#1d4ed8)", borderRadius:8,
+            display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>🛡️</div>
           <div>
-            <h1 className="text-base font-bold text-gray-800">{activeNav}</h1>
-            <div className="flex gap-1.5 mt-0.5">
-              {[
-                {label:"Fortinet",      color:"bg-red-100 text-red-700"},
-                {label:"PaloAlto",      color:"bg-orange-100 text-orange-700"},
-                {label:"UpGuard",       color:"bg-teal-100 text-teal-700"},
-                {label:"Azure",         color:"bg-blue-100 text-blue-700"},
-                {label:"Qualys",        color:"bg-orange-100 text-orange-700"},
-                {label:"ManageEngine",  color:"bg-purple-100 text-purple-700"},
-                {label:"Taegis SIEM",   color:"bg-indigo-100 text-indigo-700"},
-              ].map((t) => (
-                <span key={t.label} className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${t.color}`}>{t.label}</span>
-              ))}
-            </div>
+            <div style={{ fontWeight:700, fontSize:15, letterSpacing:0.3 }}>SecOps Command Center</div>
+            <div style={{ fontSize:10, color:"#94a3b8", letterSpacing:1.2, textTransform:"uppercase" }}>Security Operations Dashboard • v{VER}</div>
           </div>
-          <div className="flex items-center gap-3">
-            {lastRefresh && <span className="text-[10px] text-gray-400">Updated {lastRefresh.toLocaleTimeString()}</span>}
-            <button onClick={load} className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition-colors font-medium">
-              ↻ Refresh
+        </div>
+
+        {/* Role toggle */}
+        <div style={{ display:"flex", background:"rgba(0,0,0,0.25)", borderRadius:8, padding:3, gap:2 }}>
+          {[["executive","🏢 Executive Board"],["analyst","🔬 Security Analyst"]].map(([r,l])=>(
+            <button key={r} onClick={()=>{ setRole(r); setPage(r==="executive"?"overview":"alerts"); }}
+              style={{ padding:"5px 14px", borderRadius:6, border:"none", cursor:"pointer", fontWeight:600, fontSize:12,
+                background:role===r?"white":"transparent", color:role===r?C.header:"#94a3b8", transition:"all 0.15s" }}>
+              {l}
             </button>
-            <div className="flex items-center gap-1.5">
-              <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold">CS</div>
-              <span className="text-sm text-gray-600 font-medium">Admin</span>
-            </div>
-          </div>
+          ))}
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
-          {PAGE[activeNav] || (
-            <div className="flex items-center justify-center h-full text-gray-400">
-              <div className="text-center"><div className="text-5xl mb-3">🚧</div><p className="font-medium">Coming soon</p></div>
-            </div>
+
+        {/* Date range */}
+        <div style={{ display:"flex", alignItems:"center", gap:8, background:"rgba(255,255,255,0.06)",
+          borderRadius:8, padding:"6px 12px", border:"1px solid rgba(255,255,255,0.1)", fontSize:12 }}>
+          <span style={{ color:"#64748b", fontSize:10, textTransform:"uppercase", letterSpacing:1 }}>Period</span>
+          <input type="date" value={dateRange.from} onChange={e=>setDateRange(p=>({...p,from:e.target.value}))}
+            style={{ background:"transparent", border:"none", color:"white", fontSize:12, cursor:"pointer", width:120 }}/>
+          <span style={{ color:"#475569" }}>–</span>
+          <input type="date" value={dateRange.to} onChange={e=>setDateRange(p=>({...p,to:e.target.value}))}
+            style={{ background:"transparent", border:"none", color:"white", fontSize:12, cursor:"pointer", width:120 }}/>
+          {(dateRange.from||dateRange.to)&&(
+            <button onClick={()=>setDateRange({from:"",to:""})} style={{ background:"none", border:"none", color:"#94a3b8", cursor:"pointer", fontSize:14, padding:0 }}>✕</button>
           )}
-          <div className="text-center text-[10px] text-gray-300 mt-4 pb-2">
-            Security Operations Dashboard · Fortinet · Palo Alto · UpGuard · Azure Defender · Qualys · ManageEngine
-          </div>
         </div>
+
+        {/* Refresh indicator */}
+        <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"#64748b" }}>
+          <div style={{ width:7, height:7, borderRadius:"50%", background:loading?"#f59e0b":"#10b981",
+            boxShadow:loading?"0 0 0 3px #f59e0b30":"0 0 0 3px #10b98130", transition:"all 0.3s" }}/>
+          {loading?"Refreshing…":lastUpdated?`Updated ${lastUpdated.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`:"-"}
+        </div>
+
+        {/* Settings gear */}
+        <button onClick={()=>setPage("settings")}
+          style={{ background:page==="settings"?"rgba(59,130,246,0.25)":"rgba(255,255,255,0.07)",
+            border:`1px solid ${page==="settings"?"#3b82f6":"rgba(255,255,255,0.12)"}`,
+            borderRadius:8, padding:"6px 12px", cursor:"pointer", color:page==="settings"?"#93c5fd":"#94a3b8",
+            fontSize:17, lineHeight:1, transition:"all 0.15s" }}>
+          ⚙️
+        </button>
+      </header>
+
+      {/* ── BODY ──────────────────────────────────────────────────────────── */}
+      <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+
+        {/* Sidebar */}
+        <aside style={{ width:216, background:C.sidebar, display:"flex", flexDirection:"column", flexShrink:0, overflow:"auto" }}>
+          <div style={{ padding:"14px 16px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
+            <div style={{ fontSize:9, color:"#334155", textTransform:"uppercase", letterSpacing:1.8, fontWeight:700 }}>
+              {role==="executive"?"Board & Executive":"Security Team"}
+            </div>
+          </div>
+          <nav style={{ flex:1, paddingTop:6 }}>
+            {nav.map(n=>(
+              <button key={n.id} onClick={()=>setPage(n.id)}
+                style={{ display:"flex", alignItems:"center", gap:11, padding:"9px 16px", width:"100%", border:"none",
+                  background:page===n.id?"rgba(59,130,246,0.14)":"transparent", cursor:"pointer", textAlign:"left",
+                  borderLeft:`3px solid ${page===n.id?"#3b82f6":"transparent"}`, transition:"all 0.12s" }}>
+                <span style={{ fontSize:15, lineHeight:1 }}>{n.icon}</span>
+                <span style={{ fontSize:13, color:page===n.id?"#e2e8f0":"#94a3b8", fontWeight:page===n.id?600:400 }}>{n.label}</span>
+              </button>
+            ))}
+          </nav>
+          <div style={{ padding:16, borderTop:"1px solid rgba(255,255,255,0.04)" }}>
+            <div style={{ fontSize:10, color:"#1e3a5f" }}>© 2024 SecOps Platform</div>
+          </div>
+        </aside>
+
+        {/* Main */}
+        <main style={{ flex:1, overflow:"auto", padding:24 }}>
+          {loading && !data ? (
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", flexDirection:"column", gap:16 }}>
+              <div style={{ width:44, height:44, border:"3px solid #3b82f6", borderTopColor:"transparent",
+                borderRadius:"50%", animation:"spin 0.8s linear infinite" }}/>
+              <div style={{ color:C.muted, fontSize:14 }}>Loading security data…</div>
+            </div>
+          ) : renderPage()}
+        </main>
       </div>
+
+      {/* Global styles */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        @keyframes spin { to { transform:rotate(360deg); } }
+        *, *::before, *::after { box-sizing:border-box; }
+        body { margin:0; }
+        input[type="date"]::-webkit-calendar-picker-indicator { filter:invert(0.6); opacity:0.5; cursor:pointer; }
+        ::-webkit-scrollbar { width:5px; height:5px; }
+        ::-webkit-scrollbar-track { background:transparent; }
+        ::-webkit-scrollbar-thumb { background:#334155; border-radius:3px; }
+        ::-webkit-scrollbar-thumb:hover { background:#475569; }
+        button:hover { opacity:0.9; }
+        @media print {
+          aside, header button, nav { display:none !important; }
+          main { padding:0 !important; }
+        }
+      `}</style>
     </div>
   );
 }

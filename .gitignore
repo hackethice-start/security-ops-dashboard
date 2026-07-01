@@ -1,21 +1,5 @@
-# Environment files – NEVER commit these
-.env
-*.env
-.env.prod
-
-# Node
 node_modules/
-npm-debug.log*
-
-# React build output
 build/
-
-# macOS
-.DS_Store
-
-# IDE
-.vscode/
-.idea/
-
-# Docker
+.env
+.env.local
 *.log
