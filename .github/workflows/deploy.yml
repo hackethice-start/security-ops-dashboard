@@ -26,8 +26,16 @@ jobs:
       - name: Check docker compose
         run: docker compose version || apt-get install -y docker-compose-plugin
 
-      - name: Stop old stack
-        run: docker compose down --remove-orphans || true
+      - name: Free ports and stop all old containers
+        run: |
+          docker compose down --remove-orphans || true
+          echo "Stopping any container using ports 3000 or 4000..."
+          for CID in $(docker ps --format "{{.ID}} {{.Ports}}" | grep -E ":3000|:4000" | awk '{print $1}'); do
+            echo "Stopping container $CID"
+            docker stop "$CID" || true
+            docker rm -f "$CID" || true
+          done
+          echo "Port check done"
 
       - name: Build images
         run: docker compose build --no-cache
@@ -46,4 +54,4 @@ jobs:
 
       - name: Show status
         if: always()
-        run: docker compose ps && docker compose logs --tail 20
+        run: docker compose ps && docker compose logs --tail 30
