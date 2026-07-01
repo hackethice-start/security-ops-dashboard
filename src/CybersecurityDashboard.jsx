@@ -1705,18 +1705,34 @@ function AdminPage() {
   async function testTool(toolKey, instanceIdx=null) {
     const key = instanceIdx !== null ? `${toolKey}__${instanceIdx}` : toolKey;
     setTesting(key);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
     try {
       const url = instanceIdx !== null
         ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
         : `${API}/api/integrations/${toolKey}/test`;
-      const r = await fetch(url, { method: "POST" });
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!r.ok) {
+        const txt = await r.text().catch(()=>"");
+        throw new Error(`Server returned ${r.status}${txt ? ": "+txt.slice(0,120) : ""}`);
+      }
       const d = await r.json();
       setTestResults(prev => ({ ...prev, [key]: d }));
       showToast(d.success ? `${toolKey} — connected ✅` : `${toolKey} — ${d.error}`, d.success);
       fetchStatuses();
     } catch(e) {
-      setTestResults(prev => ({ ...prev, [key]: { success: false, error: e.message } }));
-      showToast(`Test failed: ${e.message}`, false);
+      clearTimeout(timer);
+      const msg = e.name === "AbortError"
+        ? "Test timed out (25s) — device/API unreachable from server"
+        : e.message || "Failed to reach backend";
+      setTestResults(prev => ({ ...prev, [key]: { success: false, error: msg } }));
+      showToast(`Test failed: ${msg.slice(0,80)}`, false);
     }
     setTesting(null);
   }
@@ -2077,18 +2093,34 @@ function IntegrationsPage({ onSave }) {
   async function testConnection(toolKey, instanceIdx=null) {
     const testKey = instanceIdx !== null ? `${toolKey}__${instanceIdx}` : toolKey;
     setTesting(testKey);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000); // 25s hard timeout
     try {
       const url = instanceIdx !== null
         ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
         : `${API}/api/integrations/${toolKey}/test`;
-      const r = await fetch(url, { method:"POST" });
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!r.ok) {
+        const txt = await r.text().catch(()=>"");
+        throw new Error(`Server returned ${r.status}${txt ? ": "+txt.slice(0,120) : ""}`);
+      }
       const data = await r.json();
       setTestResults(prev => ({ ...prev, [testKey]: data }));
       showToast(data.success ? "Connection successful ✅" : `Test failed: ${data.error}`, data.success);
       loadStatuses();
     } catch(e) {
-      setTestResults(prev => ({ ...prev, [testKey]: { success:false, error:e.message } }));
-      showToast("Connection test failed", false);
+      clearTimeout(timer);
+      const msg = e.name === "AbortError"
+        ? "Test timed out (25s) — the device or API may be unreachable from the server"
+        : e.message || "Failed to reach backend";
+      setTestResults(prev => ({ ...prev, [testKey]: { success:false, error:msg } }));
+      showToast(`Test failed: ${msg.slice(0,80)}`, false);
     }
     setTesting(null);
   }

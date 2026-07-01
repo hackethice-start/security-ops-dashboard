@@ -26,6 +26,16 @@ const http = axios.create({
 });
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
+/* ── Timeout wrapper ─────────────────────────────────────────────────── */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms/1000}s`)), ms)
+    ),
+  ]);
+}
+
 async function getCreds(tool) {
   try {
     const r = await pool.query(
@@ -350,8 +360,11 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
   const { instance } = req.query; // optional instance index for multi-instance tools
   const instanceIdx = instance !== undefined ? parseInt(instance) : null;
 
+  // Hard 20s timeout — prevents NGINX connection reset on slow external APIs
+  const TIMEOUT = 20000;
+
   try {
-    const c = await getCreds(tool);
+    const c = await withTimeout(getCreds(tool), 5000, "DB lookup");
     if (!c) return res.json({ success: false, error: "No credentials configured" });
 
     // For multi-instance tools, test a specific instance if requested
@@ -362,7 +375,7 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
       const inst = instanceIdx !== null ? (c.instances||[c])[instanceIdx] : (c.instances||[c])[0];
       if (!inst) return res.json({ success: false, error: "Instance not found" });
       try {
-        result = await collectFortinetInstance(inst);
+        result = await withTimeout(collectFortinetInstance(inst), TIMEOUT, "Fortinet");
         sample = { instance: inst.name, policies: result.policies?.length||0, message: "FortiGate API reachable" };
         await setStatus("fortinet", "connected");
       } catch(e) { return res.json({ success: false, error: e.message }); }
@@ -371,17 +384,17 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
       const inst = instanceIdx !== null ? (c.instances||[c])[instanceIdx] : (c.instances||[c])[0];
       if (!inst) return res.json({ success: false, error: "Instance not found" });
       try {
-        result = await collectAzureInstance(inst);
+        result = await withTimeout(collectAzureInstance(inst), TIMEOUT, "Azure");
         sample = { instance: inst.name, alerts: result.alerts?.length||0, secureScore: result.secureScore?.score||"N/A" };
         await setStatus("azure", "connected");
       } catch(e) { return res.json({ success: false, error: e.message }); }
 
     } else if (tool === "paloalto") {
-      result = await collectPaloAlto();
+      result = await withTimeout(collectPaloAlto(), TIMEOUT, "Palo Alto");
       if (result) sample = { rules: result.rules?.length||0, message: "PAN-OS API reachable" };
 
     } else if (tool === "upguard") {
-      result = await collectUpGuard();
+      result = await withTimeout(collectUpGuard(), TIMEOUT, "UpGuard");
       if (result) {
         const risks = result.risks?.risks||result.risks||{};
         sample = {
@@ -392,15 +405,15 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
       }
 
     } else if (tool === "qualys") {
-      result = await collectQualys();
+      result = await withTimeout(collectQualys(), TIMEOUT, "Qualys");
       if (result) sample = { detections: typeof result.detections === "string" ? "XML data received" : result.detections?.length||0, message: "Qualys API reachable" };
 
     } else if (tool === "manageengine") {
-      result = await collectManageEngine();
+      result = await withTimeout(collectManageEngine(), TIMEOUT, "ManageEngine");
       if (result) sample = { assets: result.assets?.total_count||"connected", message: "ManageEngine API reachable" };
 
     } else if (tool === "taegis") {
-      result = await collectTaegis();
+      result = await withTimeout(collectTaegis(), TIMEOUT, "Taegis");
       if (result) sample = { alerts: result.alerts?.length||0, message: "Taegis API reachable" };
 
     } else {
