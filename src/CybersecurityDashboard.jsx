@@ -63,15 +63,20 @@ function transformSnapshot(snap) {
   else if (ug.score)                        score = ug.score;
 
   // ── Vulnerabilities ─────────────────────────────────────────────────────
+  // backend parseQualysXML returns lowercase fields: { qid, host, ip, severity (text), title, cve, status, lastFound, port, type }
   const rawDetections = ql.detections;
-  const vulns = Array.isArray(rawDetections) ? rawDetections.map((d,i) => ({
-    id: d.QID || `qid-${i}`,
-    host: d.IP || d.DNS_HOST_NAME || "Unknown",
-    severity: SEV(String(d.SEVERITY || "")),
-    title: d.TITLE || d.VULN_NAME || "Vulnerability",
-    cve: d.CVE_LIST?.CVE?.[0]?.ID || "",
-    status: d.STATUS || "Active",
-    lastFound: d.LAST_FOUND_DATETIME || "",
+  const vulnerabilities = Array.isArray(rawDetections) ? rawDetections.map((d,i) => ({
+    id:        d.qid  || `qid-${i}`,
+    host:      d.host || d.ip || "Unknown",
+    ip:        d.ip   || "",
+    severity:  d.severity || "Low",   // already mapped text by backend
+    title:     d.title    || `QID ${d.qid || i}`,
+    cve:       d.cve      || "",
+    qid:       d.qid      || "",
+    status:    d.status   || "Active",
+    lastFound: d.lastFound || "",
+    port:      d.port     || "—",
+    type:      d.type     || "",
   })) : [];
 
   // ── Firewall ────────────────────────────────────────────────────────────
@@ -121,7 +126,7 @@ function transformSnapshot(snap) {
     firewall,
     assets,
     siem,
-    vulns,
+    vulnerabilities,
     azure:        azFull,
     upguard:      ug,
     qualys:       ql,
@@ -1334,14 +1339,20 @@ function AlertsPage({ data }) {
 function VulnerabilitiesPage({ data }) {
   const d = data || {};
   if (!d._hasData) return <NoData icon="🔍" title="No vulnerability data yet" message="Connect Qualys VMDR in ⚙️ Settings to see live vulnerability scan results." />;
-  const [sort, setSort] = useState("cvss");
-  const vulns = [...(d.vulnerabilities||[])].sort((a,b)=> sort==="cvss"?b.cvss-a.cvss:sort==="age"?b.age-a.age:b.affected-a.affected);
+  const [sort, setSort] = useState("severity");
+  const SEV_ORDER = { Critical:0, High:1, Medium:2, Low:3 };
+  const all = d.vulnerabilities || [];
+  const vulns = [...all].sort((a,b) => {
+    if (sort === "host") return (a.host||"").localeCompare(b.host||"");
+    if (sort === "date") return new Date(b.lastFound||0) - new Date(a.lastFound||0);
+    return (SEV_ORDER[a.severity]||3) - (SEV_ORDER[b.severity]||3);
+  });
   const bySev = {};
-  (d.vulnerabilities||[]).forEach(v=>{ bySev[v.severity]=(bySev[v.severity]||0)+1; });
-  const pieData = Object.entries(bySev).map(([k,v])=>({name:k,value:v,color:SEVERITY_COLORS[k]}));
+  all.forEach(v => { bySev[v.severity] = (bySev[v.severity]||0) + 1; });
+  const pieData = Object.entries(bySev).map(([k,v]) => ({ name:k, value:v, color:SEVERITY_COLORS[k] }));
   return (
     <div>
-      <SectionTitle title="Vulnerability Management – Qualys VMDR" subtitle="Detailed vulnerability findings, CVE analysis and remediation tracking" />
+      <SectionTitle title="Vulnerability Management – Qualys VMDR" subtitle={`${all.length} detections from live scan · sorted by ${sort}`} />
       <div style={{ display:"grid", gridTemplateColumns:"1fr 240px", gap:16, marginBottom:24 }}>
         <Card style={{ padding:20 }}>
           <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Vulnerability Distribution</div>
@@ -1366,41 +1377,55 @@ function VulnerabilitiesPage({ data }) {
       </div>
       <Card style={{ padding:20 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text }}>CVE Detail – Prioritised Remediation List</div>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text }}>Detection List – Live Qualys VMDR Results</div>
           <div style={{ display:"flex", gap:8 }}>
-            {[["cvss","By CVSS"],["affected","By Hosts Affected"],["age","By Age"]].map(([v,l])=>(
+            {[["severity","By Severity"],["host","By Host"],["date","By Date"]].map(([v,l])=>(
               <button key={v} onClick={()=>setSort(v)}
                 style={{ padding:"6px 14px", borderRadius:6, border:`1px solid ${sort===v?C.primary:C.border}`,
                   background:sort===v?`${C.primary}12`:"white", color:sort===v?C.primary:C.muted, fontSize:12, cursor:"pointer", fontWeight:600 }}>{l}</button>
             ))}
           </div>
         </div>
+        {vulns.length === 0 && (
+          <div style={{ textAlign:"center", padding:40, color:C.muted, fontSize:13 }}>
+            No detections found. Run a Qualys scan or check your credentials in ⚙️ Settings.
+          </div>
+        )}
+        {vulns.length > 0 && (
         <table style={{ width:"100%", borderCollapse:"collapse" }}>
           <thead><tr style={{ background:"#f8fafc" }}>
-            {["CVE","Severity","CVSS","Title","Affected Hosts","Age (days)","Status"].map(h=>(
+            {["Severity","QID / CVE","Host / IP","Title","Port","Last Found","Status"].map(h=>(
               <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`2px solid ${C.border}` }}>{h}</th>
             ))}
           </tr></thead>
           <tbody>
-            {vulns.map(v=>(
-              <tr key={v.id} style={{ borderBottom:`1px solid ${C.border}` }}>
-                <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:12, fontWeight:700, color:C.primary }}>{v.cve}</td>
-                <td style={{ padding:"12px 12px" }}><SeverityBadge level={v.severity}/></td>
-                <td style={{ padding:"12px 12px" }}>
-                  <span style={{ fontSize:14, fontWeight:800, color:v.cvss>=9?C.critical:v.cvss>=7?C.high:C.medium }}>{v.cvss}</span>
+            {vulns.map((v,i)=>(
+              <tr key={v.id||i} style={{ borderBottom:`1px solid ${C.border}`, background:v.severity==="Critical"?"#fef2f220":"transparent" }}>
+                <td style={{ padding:"11px 12px" }}><SeverityBadge level={v.severity}/></td>
+                <td style={{ padding:"11px 12px", fontFamily:"monospace", fontSize:11, fontWeight:700, color:C.primary }}>
+                  {v.cve ? <span title={`QID: ${v.qid}`}>{v.cve}</span> : <span style={{color:C.muted}}>QID {v.qid}</span>}
                 </td>
-                <td style={{ padding:"12px 12px", fontSize:12, color:C.text }}>{v.title}</td>
-                <td style={{ padding:"12px 12px", fontSize:13, fontWeight:700, color:C.text, textAlign:"center" }}>{v.affected}</td>
-                <td style={{ padding:"12px 12px", fontSize:12, color:v.age>30?C.critical:v.age>14?C.warn:C.muted, fontWeight:v.age>14?700:400 }}>{v.age}d</td>
-                <td style={{ padding:"12px 12px" }}>
+                <td style={{ padding:"11px 12px", fontSize:12 }}>
+                  <div style={{ fontWeight:600, color:C.text }}>{v.host}</div>
+                  {v.ip && v.ip !== v.host && <div style={{ fontSize:10, color:C.muted }}>{v.ip}</div>}
+                </td>
+                <td style={{ padding:"11px 12px", fontSize:12, color:C.text, maxWidth:280 }}>
+                  <div style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={v.title}>{v.title}</div>
+                </td>
+                <td style={{ padding:"11px 12px", fontSize:12, color:C.muted, textAlign:"center" }}>{v.port}</td>
+                <td style={{ padding:"11px 12px", fontSize:11, color:C.muted, whiteSpace:"nowrap" }}>
+                  {v.lastFound ? new Date(v.lastFound).toLocaleDateString() : "—"}
+                </td>
+                <td style={{ padding:"11px 12px" }}>
                   <span style={{ fontSize:11, fontWeight:600, padding:"3px 10px", borderRadius:20,
-                    background:v.status==="Unpatched"?"#fef2f2":v.status==="In Progress"?"#fffbeb":"#f0fdf4",
-                    color:v.status==="Unpatched"?C.critical:v.status==="In Progress"?C.warn:C.ok }}>{v.status}</span>
+                    background:v.status==="Active"?"#fef2f2":v.status==="New"?"#fff7ed":"#f0fdf4",
+                    color:v.status==="Active"?C.critical:v.status==="New"?C.warn:C.ok }}>{v.status}</span>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        )}
       </Card>
     </div>
   );
@@ -1684,17 +1709,28 @@ function AdminPage() {
     return () => clearInterval(t);
   }, []);
 
+  const [fetchError, setFetchError] = useState(null);
+
   async function fetchStatuses() {
     try {
       const r = await fetch(`${API}/api/integrations`);
-      if (r.ok) {
-        const arr = await r.json();
-        const m = {};
-        arr.forEach(x => { m[x.tool_name] = x; });
-        setStatuses(m);
-        setLastRefresh(new Date());
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        const msg = `API returned ${r.status}${txt ? ": " + txt.slice(0, 200) : ""}`;
+        console.error("GET /api/integrations failed:", msg);
+        setFetchError(msg);
+        return;
       }
-    } catch(e) { console.error("Admin fetch failed:", e); }
+      const arr = await r.json();
+      setFetchError(null);
+      const m = {};
+      arr.forEach(x => { m[x.tool_name] = x; });
+      setStatuses(m);
+      setLastRefresh(new Date());
+    } catch(e) {
+      console.error("Admin fetch failed:", e);
+      setFetchError(e.message);
+    }
   }
 
   function showToast(msg, ok=true) {
@@ -1706,7 +1742,9 @@ function AdminPage() {
     const key = instanceIdx !== null ? `${toolKey}__${instanceIdx}` : toolKey;
     setTesting(key);
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 25000);
+    // Qualys API is slow — give it 70s. Other tools: 30s.
+    const timeoutMs = toolKey === "qualys" ? 70000 : 30000;
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const url = instanceIdx !== null
         ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
@@ -1771,6 +1809,14 @@ function AdminPage() {
 
   return (
     <div>
+      {fetchError && (
+        <div style={{ margin:"0 0 16px 0", padding:"12px 16px", borderRadius:10,
+          background:"#fef2f2", border:"1px solid #fecaca", color:C.critical, fontSize:13 }}>
+          <strong>⚠️ Backend API Error</strong> — Cannot load integration statuses.<br/>
+          <span style={{ fontFamily:"monospace", fontSize:11 }}>{fetchError}</span><br/>
+          <span style={{ fontSize:11, color:C.muted }}>Check: docker compose logs backend --tail 30</span>
+        </div>
+      )}
       <SectionTitle
         title="Admin — Integration Status"
         subtitle="Live status of all connected security devices and services. Auto-refreshes every 30 seconds."

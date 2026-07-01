@@ -89,7 +89,9 @@ async function setStatus(tool, status, error=null) {
        WHERE tool_name=$1`,
       [tool, status, error]
     );
-  } catch {}
+  } catch(e) {
+    console.error(`[setStatus] Failed to update ${tool} → ${status}:`, e.message);
+  }
 }
 
 async function saveSnapshot(tool, payload) {
@@ -98,7 +100,24 @@ async function saveSnapshot(tool, payload) {
       "INSERT INTO snapshots (tool, payload, collected_at) VALUES ($1,$2,NOW())",
       [tool, JSON.stringify(payload)]
     );
-  } catch (e) { console.error("snapshot save error:", e.message); }
+    console.log(`[snapshot] Saved ${tool} (${JSON.stringify(payload).length} bytes)`);
+  } catch (e) {
+    console.error(`[snapshot] FAILED to save ${tool}:`, e.message);
+    // If partition missing, create it and retry once
+    if (e.message && e.message.includes("no partition")) {
+      console.log(`[snapshot] Attempting to create missing partition for ${tool}...`);
+      await ensurePartitions().catch(() => {});
+      try {
+        await pool.query(
+          "INSERT INTO snapshots (tool, payload, collected_at) VALUES ($1,$2,NOW())",
+          [tool, JSON.stringify(payload)]
+        );
+        console.log(`[snapshot] Retry succeeded for ${tool}`);
+      } catch(e2) {
+        console.error(`[snapshot] Retry also failed for ${tool}:`, e2.message);
+      }
+    }
+  }
 }
 
 /* ── Collectors ─────────────────────────────────────────────────────────── */
@@ -300,6 +319,38 @@ async function collectTaegis() {
   } catch(e) {
     await setStatus("taegis", "error", e.message);
     return null;
+  }
+}
+
+/* ── Ensure snapshot partitions exist for current + next 13 months ─────────── */
+async function ensurePartitions() {
+  try {
+    const result = await pool.query(`
+      DO $$
+      DECLARE
+          cur_month  DATE := DATE_TRUNC('month', NOW());
+          end_month  DATE := DATE_TRUNC('month', NOW()) + INTERVAL '13 months';
+          next_month DATE;
+          part_name  TEXT;
+      BEGIN
+          LOOP
+              next_month := cur_month + INTERVAL '1 month';
+              part_name  := 'snapshots_' || TO_CHAR(cur_month, 'YYYY_MM');
+              IF NOT EXISTS (SELECT FROM pg_tables WHERE tablename = part_name) THEN
+                  EXECUTE FORMAT(
+                      'CREATE TABLE %I PARTITION OF snapshots FOR VALUES FROM (%L) TO (%L)',
+                      part_name, cur_month, next_month
+                  );
+                  RAISE NOTICE 'Created partition: %', part_name;
+              END IF;
+              cur_month := next_month;
+              EXIT WHEN cur_month >= end_month;
+          END LOOP;
+      END $$;
+    `);
+    console.log("Snapshot partitions verified/created for current + next 13 months");
+  } catch(e) {
+    console.error("ensurePartitions error:", e.message);
   }
 }
 
@@ -570,6 +621,8 @@ app.listen(PORT, async () => {
       await new Promise(r => setTimeout(r, 3000));
     }
   }
+  // Ensure snapshot partitions exist (handles old DBs missing current month)
+  await ensurePartitions();
   // Schedule collectors based on per-tool intervals
   await scheduleCollectors();
 });
