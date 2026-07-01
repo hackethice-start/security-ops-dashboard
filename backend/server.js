@@ -229,18 +229,17 @@ async function collectQualys() {
   try {
     // Normalise platform URL: accept both qualysguard.* (web UI) and qualysapi.* (API)
     let platform = (c.platform||"https://qualysapi.qualys.com").replace(/\/$/, "");
-    // If user pasted the web UI URL, convert it to the API URL
     platform = platform.replace(/\/\/qualysguard\./, "//qualysapi.");
-    // Ensure https:// prefix
     if (!/^https?:\/\//.test(platform)) platform = "https://" + platform;
     const auth = Buffer.from(`${c.username}:${c.password}`).toString("base64");
     const headers = { Authorization: `Basic ${auth}`, "X-Requested-With": "SecOpsDashboard" };
-    // First do a lightweight ping to the session API to verify credentials
-    const ping = await http.get(`${platform}/api/2.0/fo/session/`, {
-      headers, params: { action: "login" }, validateStatus: s => s < 500,
-    }).catch(() => null);
-    const r = await http.get(
-      `${platform}/api/2.0/fo/asset/host/vm/detection/?action=list&status=New,Active&severities=4,5&truncation_limit=50`,
+    // Single request with extended timeout — Qualys API can be slow
+    const qualysHttp = axios.create({
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      timeout: 55000,
+    });
+    const r = await qualysHttp.get(
+      `${platform}/api/2.0/fo/asset/host/vm/detection/?action=list&status=New,Active&severities=4,5&truncation_limit=20`,
       { headers }
     );
     const parsed = parseQualysXML(r.data);
@@ -341,34 +340,30 @@ app.get("/api/health", (_, res) => res.json({ status:"ok", ts: new Date() }));
 // Get all integration statuses — returns safe display info only (no secrets)
 app.get("/api/integrations", async (_, res) => {
   try {
-    const r = await pool.query(`
-      SELECT
-        tool_name, enabled, status, last_tested, last_error,
-        refresh_interval, updated_at,
-        -- instance count for multi-instance tools
-        CASE
-          WHEN credentials -> 'instances' IS NOT NULL
-          THEN jsonb_array_length(credentials -> 'instances')
-          ELSE 0
-        END AS instance_count,
-        -- safe display names for instances (name + host only, no secrets)
-        CASE
-          WHEN credentials -> 'instances' IS NOT NULL
-          THEN (
-            SELECT jsonb_agg(
-              jsonb_build_object(
-                'name', elem ->> 'name',
-                'host', COALESCE(elem->>'host', elem->>'tenantId', elem->>'subscriptionId', '')
-              )
-            )
-            FROM jsonb_array_elements(credentials -> 'instances') AS elem
-          )
-          ELSE NULL
-        END AS instances
-      FROM integrations
-      ORDER BY tool_name
-    `);
-    res.json(r.rows);
+    const r = await pool.query(
+      "SELECT tool_name, enabled, status, last_tested, last_error, refresh_interval, updated_at, credentials FROM integrations ORDER BY tool_name"
+    );
+    const rows = r.rows.map(row => {
+      const creds = row.credentials || {};
+      const rawInstances = Array.isArray(creds.instances) ? creds.instances : null;
+      return {
+        tool_name:        row.tool_name,
+        enabled:          row.enabled,
+        status:           row.status,
+        last_tested:      row.last_tested,
+        last_error:       row.last_error,
+        refresh_interval: row.refresh_interval,
+        updated_at:       row.updated_at,
+        instance_count:   rawInstances ? rawInstances.length : 0,
+        instances: rawInstances
+          ? rawInstances.map(inst => ({
+              name: inst.name || "",
+              host: inst.host || inst.tenantId || inst.subscriptionId || "",
+            }))
+          : null,
+      };
+    });
+    res.json(rows);
   } catch(e) {
     console.error("GET /api/integrations error:", e.message);
     res.status(500).json({ error: e.message });
@@ -400,7 +395,7 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
   const instanceIdx = instance !== undefined ? parseInt(instance) : null;
 
   // Hard 20s timeout — prevents NGINX connection reset on slow external APIs
-  const TIMEOUT = 20000;
+  const TIMEOUT = tool === 'qualys' ? 60000 : 20000; // Qualys API is slow
 
   try {
     const c = await withTimeout(getCreds(tool), 5000, "DB lookup");
