@@ -581,8 +581,8 @@ function LoginPage({ onLogin }) {
         body: JSON.stringify({ username: user, password: pass }),
       });
       const j = await res.json().catch(() => ({}));
-      if (res.ok && j.user) {
-        onLogin(j.user);
+      if (res.ok && j.username) {
+        onLogin(j);
       } else {
         setError(j.error || "Invalid credentials. Please try again.");
       }
@@ -1692,8 +1692,8 @@ export default function App() {
       const meRes = await apiFetch(`${API}/api/auth/me`);
       if (!meRes.ok) { setSession(null); setLoading(false); return; }
       const me = await meRes.json().catch(() => null);
-      if (!me || !me.user) { setSession(null); setLoading(false); return; }
-      setSession(me.user);
+      if (!me || !me.username) { setSession(null); setLoading(false); return; }
+      setSession(me);
 
       const snapRes = await apiFetch(`${API}/api/snapshot`);
       if (snapRes.ok) {
