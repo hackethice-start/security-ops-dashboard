@@ -81,12 +81,55 @@ function transformSnapshot(snap) {
   })) : [];
 
   // ── Firewall ────────────────────────────────────────────────────────────
+  // Fortinet CMDB policies: { policyid, name, action:"accept"|"deny", ... }
+  // Fortinet monitor stats: { policyid, bytes, packets, software_packets, ... }
+  // Palo Alto rules:        { "@name": "...", action:"allow"|"deny", ... }
+  const ftPolicies = Array.isArray(ft.policies) ? ft.policies : [];
+  const ftStats    = Array.isArray(ft.stats)    ? ft.stats    : [];
+  const paRules    = Array.isArray(pa.rules)    ? pa.rules    : [];
+
+  // Join CMDB config with monitor hit counts
+  const statsById = {};
+  ftStats.forEach(s => { if (s.policyid != null) statsById[s.policyid] = s; });
+
+  const ftMapped = ftPolicies.map(p => {
+    const st  = statsById[p.policyid] || {};
+    const hits = st.packets || st.bytes || 0;
+    const action = (p.action||"").toLowerCase() === "accept" ? "Allow"
+                 : (p.action||"").toLowerCase() === "deny"   ? "Deny"
+                 : p.action || "Allow";
+    return { name: p.name || `Policy ${p.policyid}`, hits, action, policyid: p.policyid };
+  });
+
+  const paMapped = paRules.map(r => ({
+    name:   r["@name"] || r.name || "Rule",
+    hits:   r.bytes || r.packets || 0,
+    action: (r.action||"allow").toLowerCase() === "deny" ? "Deny" : "Allow",
+  }));
+
+  const allPolicies = [...ftMapped, ...paMapped]
+    .sort((a,b) => b.hits - a.hits)
+    .slice(0, 10);
+
+  // Derive block/allow totals from policy stats
+  const blockedToday = ftMapped.filter(p=>p.action==="Deny").reduce((s,p)=>s+p.hits,0)
+    + paMapped.filter(p=>p.action==="Deny").reduce((s,p)=>s+p.hits,0);
+  const allowedToday = ftMapped.filter(p=>p.action==="Allow").reduce((s,p)=>s+p.hits,0)
+    + paMapped.filter(p=>p.action==="Allow").reduce((s,p)=>s+p.hits,0);
+
   const firewall = {
-    instance: ft.instance || pa.instance || "",
-    policies: Array.isArray(ft.policies) ? ft.policies : [],
-    stats:     Array.isArray(ft.stats)    ? ft.stats    : [],
-    interfaces: Array.isArray(ft.interfaces) ? ft.interfaces : [],
-    rules:     Array.isArray(pa.rules)    ? pa.rules    : [],
+    instance:    ft.instance || pa.instance || "",
+    topPolicies: allPolicies,
+    blockedToday,
+    allowedToday,
+    policyCount: ftPolicies.length + paRules.length,
+    // trafficByHour / topThreatCountries require log DB access — not available from config API
+    trafficByHour:      [],
+    topThreatCountries: [],
+    // raw data kept for future use
+    policies: ftPolicies,
+    stats:    ftStats,
+    rules:    paRules,
   };
 
   // ── SIEM ────────────────────────────────────────────────────────────────
@@ -1544,60 +1587,83 @@ function VulnerabilitiesPage({ data }) {
 function FirewallPage({ data }) {
   const d = data || {};
   if (!d._hasData) return <NoData icon="🔥" title="No firewall data yet" message="Connect Fortinet or Palo Alto in ⚙️ Settings to see live firewall analytics." />;
+  const fw = d.firewall || {};
+  const policies  = fw.topPolicies || [];
+  const blocked   = fw.blockedToday || 0;
+  const allowed   = fw.allowedToday || 0;
+  const total     = blocked + allowed;
+  const blockRate = total > 0 ? Math.round(blocked / total * 100) : 0;
+  const hasTraffic = fw.trafficByHour?.length > 0;
+  const hasCountries = fw.topThreatCountries?.length > 0;
   return (
     <div>
-      <SectionTitle title="Firewall Analytics – Fortinet & Palo Alto" subtitle="Traffic analysis, policy hits and threat blocking statistics" />
+      <SectionTitle title="Firewall Analytics – Fortinet & Palo Alto" subtitle="Policy inventory, hit counts and traffic statistics" />
       <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
-        <MetricCard icon="🚫" label="Blocked Today" value={(d.firewall?.blockedToday||12847).toLocaleString()} sub="Malicious connections" color={C.critical}/>
-        <MetricCard icon="✅" label="Allowed Today" value={(d.firewall?.allowedToday||184293).toLocaleString()} sub="Legitimate traffic" color={C.ok}/>
-        <MetricCard icon="📊" label="Block Rate" value={`${Math.round(d.firewall?.blockedToday/(d.firewall?.blockedToday+d.firewall?.allowedToday)*100)||6.5}%`} sub="Of total traffic" color={C.primaryLight}/>
-        <MetricCard icon="⚡" label="IPS Signatures" value="47,231" sub="Active threat signatures" color={C.primary}/>
+        <MetricCard icon="📋" label="Total Policies" value={(fw.policyCount||policies.length).toLocaleString()} sub="Configured rules" color={C.primary}/>
+        <MetricCard icon="✅" label="Allow Rules" value={policies.filter(p=>p.action==="Allow").length} sub="Permit policies" color={C.ok}/>
+        <MetricCard icon="🚫" label="Deny Rules" value={policies.filter(p=>p.action==="Deny").length} sub="Block policies" color={C.critical}/>
+        <MetricCard icon="📊" label="Packet Hits" value={total > 0 ? total.toLocaleString() : "—"} sub="Total across all policies" color={C.primaryLight}/>
       </div>
-      <Card style={{ padding:20, marginBottom:16 }}>
-        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Traffic Volume – Last 24 Hours</div>
-        <ResponsiveContainer width="100%" height={220}>
-          <AreaChart data={d.firewall?.trafficByHour||[]} margin={{top:5,right:10,left:-10,bottom:0}}>
-            <defs>
-              <linearGradient id="blockGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={C.critical} stopOpacity={0.3}/><stop offset="95%" stopColor={C.critical} stopOpacity={0}/>
-              </linearGradient>
-              <linearGradient id="allowGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={C.ok} stopOpacity={0.3}/><stop offset="95%" stopColor={C.ok} stopOpacity={0}/>
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
-            <XAxis dataKey="hour" tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false} interval={3}/>
-            <YAxis tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}/>
-            <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}/>
-            <Legend iconType="circle" wrapperStyle={{fontSize:12}}/>
-            <Area type="monotone" dataKey="allowed" name="Allowed" stroke={C.ok} fill="url(#allowGrad)" strokeWidth={2}/>
-            <Area type="monotone" dataKey="blocked" name="Blocked" stroke={C.critical} fill="url(#blockGrad)" strokeWidth={2}/>
-          </AreaChart>
-        </ResponsiveContainer>
-      </Card>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+      {hasTraffic ? (
+        <Card style={{ padding:20, marginBottom:16 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Traffic Volume – Last 24 Hours</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <AreaChart data={fw.trafficByHour} margin={{top:5,right:10,left:-10,bottom:0}}>
+              <defs>
+                <linearGradient id="blockGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={C.critical} stopOpacity={0.3}/><stop offset="95%" stopColor={C.critical} stopOpacity={0}/>
+                </linearGradient>
+                <linearGradient id="allowGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={C.ok} stopOpacity={0.3}/><stop offset="95%" stopColor={C.ok} stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
+              <XAxis dataKey="hour" tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false} interval={3}/>
+              <YAxis tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}/>
+              <Legend iconType="circle" wrapperStyle={{fontSize:12}}/>
+              <Area type="monotone" dataKey="allowed" name="Allowed" stroke={C.ok} fill="url(#allowGrad)" strokeWidth={2}/>
+              <Area type="monotone" dataKey="blocked" name="Blocked" stroke={C.critical} fill="url(#blockGrad)" strokeWidth={2}/>
+            </AreaChart>
+          </ResponsiveContainer>
+        </Card>
+      ) : null}
+      <div style={{ display:"grid", gridTemplateColumns: hasCountries ? "1fr 1fr" : "1fr", gap:16 }}>
         <Card style={{ padding:20 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Firewall Policy Hits</div>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>
+            Firewall Policy List {policies.length > 0 && <span style={{ fontSize:11, fontWeight:400, color:C.muted }}>({policies.length} rules)</span>}
+          </div>
+          {policies.length === 0 ? (
+            <div style={{ textAlign:"center", color:C.muted, fontSize:13, padding:"24px 0" }}>
+              No policy data yet — policies will appear after a successful collection
+            </div>
+          ) : (
           <table style={{ width:"100%", borderCollapse:"collapse" }}>
-            <thead><tr><th style={{ padding:"8px 10px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Policy</th>
-              <th style={{ padding:"8px 10px", textAlign:"right", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Hits</th>
+            <thead><tr>
+              <th style={{ padding:"8px 10px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Policy Name</th>
+              <th style={{ padding:"8px 10px", textAlign:"right", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Packets</th>
               <th style={{ padding:"8px 10px", textAlign:"center", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Action</th>
             </tr></thead>
-            <tbody>{d.firewall?.topPolicies?.map((p,i)=>(
+            <tbody>{policies.map((p,i)=>(
               <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
                 <td style={{ padding:"10px 10px", fontSize:12, color:C.text }}>{p.name}</td>
-                <td style={{ padding:"10px 10px", fontSize:13, fontWeight:700, color:C.text, textAlign:"right" }}>{p.hits.toLocaleString()}</td>
+                <td style={{ padding:"10px 10px", fontSize:13, fontWeight:700, color:C.text, textAlign:"right" }}>
+                  {p.hits > 0 ? p.hits.toLocaleString() : "—"}
+                </td>
                 <td style={{ padding:"10px 10px", textAlign:"center" }}>
                   <span style={{ fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:10,
-                    background:p.action==="Allow"?"#f0fdf4":"#fef2f2", color:p.action==="Allow"?C.ok:C.critical }}>{p.action}</span>
+                    background:p.action==="Allow"?"#f0fdf4":p.action==="Deny"?"#fef2f2":"#f8fafc",
+                    color:p.action==="Allow"?C.ok:p.action==="Deny"?C.critical:C.muted }}>{p.action}</span>
                 </td>
               </tr>
             ))}</tbody>
           </table>
+          )}
         </Card>
+        {hasCountries && (
         <Card style={{ padding:20 }}>
           <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Threat Source Countries</div>
-          {d.firewall?.topThreatCountries?.map((c,i)=>(
+          {fw.topThreatCountries.map((c,i)=>(
             <div key={c.country} style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
               <div style={{ width:28, height:28, background:`${C.critical}15`, borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:C.critical }}>{i+1}</div>
               <div style={{ flex:1 }}>
@@ -1606,12 +1672,13 @@ function FirewallPage({ data }) {
                   <span style={{ fontSize:12, color:C.muted }}>{c.count.toLocaleString()}</span>
                 </div>
                 <div style={{ height:6, background:"#f1f5f9", borderRadius:3 }}>
-                  <div style={{ height:"100%", width:`${(c.count/d.firewall.topThreatCountries[0].count)*100}%`, background:`linear-gradient(90deg,${C.critical}aa,${C.critical})`, borderRadius:3 }}/>
+                  <div style={{ height:"100%", width:`${(c.count/fw.topThreatCountries[0].count)*100}%`, background:`linear-gradient(90deg,${C.critical}aa,${C.critical})`, borderRadius:3 }}/>
                 </div>
               </div>
             </div>
           ))}
         </Card>
+        )}
       </div>
     </div>
   );
