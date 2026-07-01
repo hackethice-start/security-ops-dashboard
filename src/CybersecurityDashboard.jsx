@@ -3243,7 +3243,9 @@ function VulnAssessmentPage() {
     try {
       const r = await apiFetch(`${VULN_API}/api/vuln/kali/health`);
       const d = await r.json();
-      setKaliStatus(d.kali?.ok ? "ok" : "error");
+      // d.kali.ok (wrapped by vuln service) or d.ok (raw agent response)
+      const alive = d.kali?.ok === true || d.ok === true;
+      setKaliStatus(alive ? "ok" : "error");
     } catch(e) { setKaliStatus("error"); }
   }
 

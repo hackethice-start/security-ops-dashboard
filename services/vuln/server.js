@@ -420,9 +420,10 @@ app.get("/api/vuln/kali/tools", requireAuth, async (req, res) => {
 app.get("/api/vuln/kali/health", async (req, res) => {
   try {
     const r = await axios.get(`${KALI_AGENT_URL}/health`, { timeout: 8000 });
-    res.json(r.data);
+    // Wrap in { kali: {...} } so frontend can read d.kali?.ok
+    res.json({ kali: r.data, ok: true });
   } catch(e) {
-    res.status(503).json({ ok: false, error: e.message });
+    res.status(503).json({ kali: { ok: false }, ok: false, error: e.message });
   }
 });
 
