@@ -59,8 +59,9 @@ function transformSnapshot(snap) {
   // ── Secure score ────────────────────────────────────────────────────────
   let score = 0;
   if (az.secureScore?.score !== undefined) score = Math.round(az.secureScore.score * 100);
-  else if (ug.risks?.score)                 score = ug.risks.score;
-  else if (ug.score)                        score = ug.score;
+  else if (ug.breachsight?.score)          score = ug.breachsight.score;
+  else if (ug.risks?.score)                score = ug.risks.score;
+  else if (ug.score)                       score = ug.score;
 
   // ── Vulnerabilities ─────────────────────────────────────────────────────
   // backend parseQualysXML returns lowercase fields: { qid, host, ip, severity (text), title, cve, status, lastFound, port, type }
@@ -104,12 +105,32 @@ function transformSnapshot(snap) {
     raw:       meRaw,
   };
 
-  // ── UpGuard risks ───────────────────────────────────────────────────────
+  // ── UpGuard risks → surface ─────────────────────────────────────────────
   // Backend returns: { risks: { risks: [...] }, breachsight: { score: N } }
-  const risks = {
-    risks: Array.isArray(ug.risks?.risks) ? ug.risks.risks : [],
-    score: ug.breachsight?.score || ug.risks?.score || null,
-  };
+  const ugRisksArr  = Array.isArray(ug.risks?.risks) ? ug.risks.risks : [];
+  const ugScore     = ug.breachsight?.score ?? ug.risks?.score ?? null;
+  const ugGrade = ugScore === null ? null
+    : ugScore >= 90 ? "A" : ugScore >= 80 ? "B+" : ugScore >= 70 ? "B"
+    : ugScore >= 60 ? "C+" : ugScore >= 50 ? "C" : "D";
+  const risks = { risks: ugRisksArr, score: ugScore };   // kept for backward compat
+
+  // Map to the shape AttackSurfacePage reads (d.surface)
+  const surface = ugScore !== null || ugRisksArr.length > 0 ? {
+    score:    ugScore ?? 0,
+    grade:    ugGrade ?? "N/A",
+    findings: ugRisksArr.map(r => ({
+      severity: r.severity
+        ? r.severity.charAt(0).toUpperCase() + r.severity.slice(1)
+        : "Medium",
+      title: r.finding || r.risk || "Risk finding",
+      asset: (Array.isArray(r.hostnames) && r.hostnames[0]) || r.id || "—",
+      first: r.firstDetected
+        ? new Date(r.firstDetected).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})
+        : "—",
+    })),
+    // Domain/IP counts not available from /risks — leave null so UI shows "—"
+    domains: null, subdomains: null, openPorts: null, ipRanges: null,
+  } : null;
 
   // ── Azure (flatten secureScore to a number) ──────────────────────────────
   const azFull = {
@@ -127,6 +148,7 @@ function transformSnapshot(snap) {
     trendDays: [],          // requires historical API — use /api/snapshots/:tool
     alerts,
     risks,
+    surface,                // UpGuard attack surface — mapped from risks[]
     firewall,
     assets,
     siem,
@@ -1600,24 +1622,29 @@ function AttackSurfacePage({ data }) {
   const d = data || {};
   if (!d._hasData) return <NoData icon="🌐" title="No attack surface data yet" message="Connect UpGuard in ⚙️ Settings to see your external attack surface data." />;
   const s = d.surface;
-  const gradeColor = s?.grade?.startsWith("A")?C.ok:s?.grade?.startsWith("B")?C.ok:s?.grade?.startsWith("C")?C.warn:C.critical;
+  const gradeColor = !s?.grade ? C.muted
+    : s.grade.startsWith("A") ? C.ok : s.grade.startsWith("B") ? C.ok : s.grade.startsWith("C") ? C.warn : C.critical;
   return (
     <div>
       <SectionTitle title="Attack Surface – UpGuard" subtitle="External exposure monitoring, risk findings and brand protection" />
       <div style={{ display:"grid", gridTemplateColumns:"200px 1fr", gap:16, marginBottom:24 }}>
         <Card style={{ padding:24, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
-          <div style={{ fontSize:72, fontWeight:900, color:gradeColor, lineHeight:1 }}>{s?.grade||"C+"}</div>
-          <div style={{ fontSize:14, color:C.muted, marginTop:8 }}>Surface Score</div>
-          <div style={{ fontSize:28, fontWeight:800, color:C.text, marginTop:4 }}>{s?.score||68}/100</div>
+          <div style={{ fontSize:72, fontWeight:900, color:gradeColor, lineHeight:1 }}>{s?.grade||"—"}</div>
+          <div style={{ fontSize:14, color:C.muted, marginTop:8 }}>Security Grade</div>
+          <div style={{ fontSize:28, fontWeight:800, color:C.text, marginTop:4 }}>{s?.score != null ? `${s.score}/100` : "—"}</div>
         </Card>
         <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
           {[
-            {icon:"🌐",label:"Domains",value:s?.domains||12},{icon:"🔗",label:"Subdomains",value:s?.subdomains||34},
-            {icon:"🔌",label:"Open Ports",value:s?.openPorts||18},{icon:"📡",label:"IP Ranges",value:s?.ipRanges||5},
+            {icon:"🌐",label:"Domains",value:s?.domains},
+            {icon:"🔗",label:"Subdomains",value:s?.subdomains},
+            {icon:"🔌",label:"Open Ports",value:s?.openPorts},
+            {icon:"📡",label:"IP Ranges",value:s?.ipRanges},
           ].map(m=>(
             <Card key={m.label} style={{ padding:16, textAlign:"center" }}>
               <div style={{ fontSize:24 }}>{m.icon}</div>
-              <div style={{ fontSize:24, fontWeight:800, color:C.text, marginTop:4 }}>{m.value}</div>
+              <div style={{ fontSize:24, fontWeight:800, color:m.value!=null?C.text:C.muted, marginTop:4 }}>
+                {m.value != null ? m.value : "—"}
+              </div>
               <div style={{ fontSize:11, color:C.muted }}>{m.label}</div>
             </Card>
           ))}

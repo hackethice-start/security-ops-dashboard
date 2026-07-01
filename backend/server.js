@@ -144,12 +144,23 @@ async function saveSnapshot(tool, payload) {
 async function collectFortinetInstance(inst) {
   const base = (inst.host||"").replace(/\/$/, "");
   if (!base) throw new Error("No host configured");
-  const headers = { Authorization: `Bearer ${inst.apikey}` };
-  const [mon, pol] = await Promise.all([
-    http.get(`${base}/api/v2/monitor/firewall/policy-list`, { headers }),
-    http.get(`${base}/api/v2/monitor/fortiview/statistics`, { headers }),
+  // FortiGate API key goes in Authorization header as "Bearer <key>"
+  // For username/password auth, FortiGate also accepts login session
+  const headers = inst.apikey
+    ? { Authorization: `Bearer ${inst.apikey}` }
+    : { Authorization: `Bearer ${inst.password}` };   // some versions use password field
+  // Correct FortiOS REST API v2 endpoints:
+  //   /api/v2/cmdb/firewall/policy  — firewall policy list (CMDB config)
+  //   /api/v2/monitor/firewall/policy — live stats per policy
+  const [cmdbPolicies, monPolicies] = await Promise.all([
+    http.get(`${base}/api/v2/cmdb/firewall/policy`, { headers })
+      .catch(() => ({ data: {} })),
+    http.get(`${base}/api/v2/monitor/firewall/policy`, { headers, params: { policyid: 0 } })
+      .catch(() => ({ data: {} })),
   ]);
-  return { source:"fortinet", instance: inst.name||base, policies: mon.data?.results||[], stats: pol.data?.results||[] };
+  const policies = cmdbPolicies.data?.results || cmdbPolicies.data?.result || [];
+  const stats    = monPolicies.data?.results  || monPolicies.data?.result  || [];
+  return { source:"fortinet", instance: inst.name||base, policies, stats };
 }
 
 async function collectFortinet() {
@@ -180,14 +191,41 @@ async function collectPaloAlto() {
   if (!c) return null;
   try {
     const base = c.host.replace(/\/$/, "");
-    const url = `${base}/restapi/v10.1/Objects/SecurityRules`;
-    const r = await http.get(url, { headers: { "X-PAN-KEY": c.apikey } });
-    const snap = { source:"paloalto", rules: r.data?.result?.entry||[] };
+    const headers = { "X-PAN-KEY": c.apikey };
+    // PAN-OS REST API requires location + vsys params
+    // Try REST API first, fall back to XML API which is more universally supported
+    let rules = [];
+    try {
+      const rest = await http.get(`${base}/restapi/v10.1/Policies/SecurityRules`, {
+        headers,
+        params: { location: "vsys", vsys: "vsys1" },
+      });
+      rules = rest.data?.result?.entry || [];
+    } catch {
+      // Fall back to PAN-OS XML API (works on all versions)
+      const xml = await http.get(`${base}/api/`, {
+        headers,
+        params: {
+          type: "config",
+          action: "get",
+          xpath: "/config/devices/entry/vsys/entry[@name='vsys1']/rulebase/security/rules",
+          key: c.apikey,
+        },
+      });
+      // Parse entry list from XML response — axios returns string for XML
+      const body = typeof xml.data === "string" ? xml.data : JSON.stringify(xml.data);
+      const names = [...body.matchAll(/entry name="([^"]+)"/g)].map(m => ({ "@name": m[1] }));
+      rules = names;
+    }
+    const snap = { source:"paloalto", rules };
     await saveSnapshot("paloalto", snap);
     await setStatus("paloalto", "connected");
     return snap;
   } catch(e) {
-    await setStatus("paloalto", "error", e.message);
+    const msg = e.response
+      ? `HTTP ${e.response.status} from PAN-OS API`
+      : e.message;
+    await setStatus("paloalto", "error", msg);
     return null;
   }
 }
