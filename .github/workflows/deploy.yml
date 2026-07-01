@@ -26,16 +26,19 @@ jobs:
       - name: Check docker compose
         run: docker compose version || apt-get install -y docker-compose-plugin
 
-      - name: Free ports and stop all old containers
+      - name: Free ports and remove stale containers
         run: |
           docker compose down --remove-orphans || true
-          echo "Stopping any container using ports 3000 or 4000..."
+          echo "--- Removing stale named containers ---"
+          for NAME in secops-db secops-backend secops-dashboard; do
+            docker rm -f "$NAME" 2>/dev/null && echo "Removed $NAME" || true
+          done
+          echo "--- Stopping containers on ports 3000/4000 ---"
           for CID in $(docker ps --format "{{.ID}} {{.Ports}}" | grep -E ":3000|:4000" | awk '{print $1}'); do
-            echo "Stopping container $CID"
             docker stop "$CID" || true
             docker rm -f "$CID" || true
           done
-          echo "Port check done"
+          echo "Done"
 
       - name: Build images
         run: docker compose build --no-cache
