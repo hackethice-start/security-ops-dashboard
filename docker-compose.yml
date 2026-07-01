@@ -31,6 +31,10 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
       - PORT=4000
       - NODE_ENV=production
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     depends_on:
       db:
         condition: service_healthy
