@@ -277,13 +277,35 @@ async function scheduleCollectors() {
 // Health
 app.get("/api/health", (_, res) => res.json({ status:"ok", ts: new Date() }));
 
-// Get all integration statuses (no secrets)
+// Get all integration statuses (credentials returned with secrets masked)
 app.get("/api/integrations", async (_, res) => {
   try {
     const r = await pool.query(
-      "SELECT tool_name, enabled, status, last_tested, last_error, refresh_interval, updated_at FROM integrations ORDER BY tool_name"
+      "SELECT tool_name, enabled, status, last_tested, last_error, refresh_interval, updated_at, credentials FROM integrations ORDER BY tool_name"
     );
-    res.json(r.rows);
+    const SECRET_KEYS = /apikey|api_key|password|secret|token|clientsecret/i;
+    function safeCreds(creds) {
+      if (!creds || typeof creds !== "object") return {};
+      if (Array.isArray(creds.instances)) {
+        return {
+          instances: creds.instances.map(inst => {
+            const s = {};
+            for (const [k, v] of Object.entries(inst))
+              s[k] = SECRET_KEYS.test(k) ? "●●●●●●" : v;
+            return s;
+          }),
+        };
+      }
+      const s = {};
+      for (const [k, v] of Object.entries(creds))
+        s[k] = SECRET_KEYS.test(k) ? "●●●●●●" : v;
+      return s;
+    }
+    const rows = r.rows.map(row => ({
+      ...row,
+      credentials: safeCreds(row.credentials),
+    }));
+    res.json(rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

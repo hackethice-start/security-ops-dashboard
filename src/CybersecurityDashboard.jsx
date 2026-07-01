@@ -6,6 +6,130 @@ import {
   Legend, ResponsiveContainer
 } from "recharts";
 
+/* ─────────────────────────────────────────────────────────────────────────
+   transformSnapshot: maps per-tool snapshot data (from /api/snapshot) into
+   the flat structure pages expect.  Returns {} when no data is available.
+──────────────────────────────────────────────────────────────────────────── */
+function transformSnapshot(snap) {
+  if (!snap || Object.keys(snap).length === 0) return {};
+
+  const ft = snap.fortinet || {};
+  const pa = snap.paloalto  || {};
+  const az = snap.azure     || {};
+  const ug = snap.upguard   || {};
+  const ql = snap.qualys    || {};
+  const me = snap.manageengine || {};
+  const tx = snap.taegis    || {};
+
+  // ── Alerts (merge Taegis + Azure Defender) ──────────────────────────────
+  const SEV = s => {
+    const l = (s||"").toLowerCase();
+    if (l.includes("critical")) return "Critical";
+    if (l.includes("high"))     return "High";
+    if (l.includes("medium"))   return "Medium";
+    return "Low";
+  };
+
+  const alerts = [
+    ...(Array.isArray(tx.alerts) ? tx.alerts.map((a,i) => ({
+      id: a.id || `tx-${i}`,
+      tool: "Taegis XDR",
+      type: a.rule_name || a.type || "Alert",
+      severity: SEV(a.severity),
+      desc: a.message || a.description || "Alert detected",
+      time: a.metadata?.created_at ? new Date(a.metadata.created_at).toLocaleString() : "Recent",
+      status: a.status === "OPEN" ? "Active" : (a.status || "Active"),
+      src: a.metadata?.device_ip || "N/A",
+    })) : []),
+    ...(Array.isArray(az.alerts) ? az.alerts.map((a,i) => ({
+      id: a.id || a.name || `az-${i}`,
+      tool: "Azure Defender",
+      type: a.properties?.alertType || "Azure Alert",
+      severity: SEV(a.properties?.severity || a.severity),
+      desc: a.properties?.alertDisplayName || a.displayName || "Azure security alert",
+      time: a.properties?.startTimeUtc ? new Date(a.properties.startTimeUtc).toLocaleString() : "Recent",
+      status: a.properties?.status || "Active",
+      src: a.properties?.resourceIdentifiers?.[0]?.resourceId?.split("/").pop() || "Azure",
+    })) : []),
+  ].sort((a,b) => {
+    const ord = { Critical:0, High:1, Medium:2, Low:3 };
+    return (ord[a.severity]||3) - (ord[b.severity]||3);
+  });
+
+  // ── Secure score ────────────────────────────────────────────────────────
+  let score = 0;
+  if (az.secureScore?.score !== undefined) score = Math.round(az.secureScore.score * 100);
+  else if (ug.risks?.score)                 score = ug.risks.score;
+  else if (ug.score)                        score = ug.score;
+
+  // ── Vulnerabilities ─────────────────────────────────────────────────────
+  const rawDetections = ql.detections;
+  const vulns = Array.isArray(rawDetections) ? rawDetections.map((d,i) => ({
+    id: d.QID || `qid-${i}`,
+    host: d.IP || d.DNS_HOST_NAME || "Unknown",
+    severity: SEV(String(d.SEVERITY || "")),
+    title: d.TITLE || d.VULN_NAME || "Vulnerability",
+    cve: d.CVE_LIST?.CVE?.[0]?.ID || "",
+    status: d.STATUS || "Active",
+    lastFound: d.LAST_FOUND_DATETIME || "",
+  })) : [];
+
+  // ── Firewall ────────────────────────────────────────────────────────────
+  const firewall = {
+    instance: ft.instance || pa.instance || "",
+    policies: Array.isArray(ft.policies) ? ft.policies : [],
+    stats:     Array.isArray(ft.stats)    ? ft.stats    : [],
+    interfaces: Array.isArray(ft.interfaces) ? ft.interfaces : [],
+    rules:     Array.isArray(pa.rules)    ? pa.rules    : [],
+  };
+
+  // ── SIEM ────────────────────────────────────────────────────────────────
+  const siem = {
+    eventsToday:    (tx.alerts?.length || 0) + (az.alerts?.length || 0),
+    activeIncidents: alerts.filter(a => a.status === "Active" || a.status === "OPEN").length,
+    meanDetect: "N/A",
+    events: alerts.slice(0, 20),
+  };
+
+  // ── Assets (ManageEngine) ───────────────────────────────────────────────
+  const meRaw = me.assets || {};
+  const assets = {
+    endpoints: meRaw.total_count || meRaw.total || 0,
+    patches:   (me.patches?.SystemDetails || []),
+    raw:       meRaw,
+  };
+
+  // ── UpGuard risks ───────────────────────────────────────────────────────
+  const risks = ug.risks || ug.domain_risks || {};
+
+  // ── Azure (flatten secureScore to a number) ──────────────────────────────
+  const azFull = {
+    ...az,
+    secureScore: az.secureScore?.score !== undefined
+      ? Math.round(az.secureScore.score * 100)
+      : (typeof az.secureScore === "number" ? az.secureScore : 0),
+    secureScoreMax: 100,
+  };
+
+  return {
+    _hasData:  true,
+    _sources:  Object.keys(snap).filter(k => !k.startsWith("_")),
+    score,
+    trendDays: [],          // requires historical API — use /api/snapshots/:tool
+    alerts,
+    risks,
+    firewall,
+    assets,
+    siem,
+    vulns,
+    azure:        azFull,
+    upguard:      ug,
+    qualys:       ql,
+    manageengine: me,
+  };
+}
+
+
 /* ═══════════════════════════════════════════════════════════════════════════
    CONFIG
 ═══════════════════════════════════════════════════════════════════════════ */
@@ -343,14 +467,30 @@ function StatRow({ label, value, sub, color }) {
    EXECUTIVE PAGES
 ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ── NoData helper ──────────────────────────────────────────────────────── */
+function NoData({ icon="📭", title="No live data yet", message }) {
+  return (
+    <div style={{ textAlign:"center", padding:"64px 24px", color:C.muted }}>
+      <div style={{ fontSize:52, marginBottom:14, opacity:0.6 }}>{icon}</div>
+      <div style={{ fontSize:17, fontWeight:700, color:C.text, marginBottom:8 }}>{title}</div>
+      <div style={{ fontSize:13, maxWidth:420, margin:"0 auto", lineHeight:1.6 }}>
+        {message || "Configure this integration in ⚙️ Settings to start collecting live data."}
+      </div>
+    </div>
+  );
+}
+
 // ── Security Posture (Executive Home) ────────────────────────────────────────
 function OverviewPage({ data }) {
-  const d = data || buildMock();
-  const critAlerts = d.alerts.filter(a=>a.severity==="Critical").length;
-  const highAlerts = d.alerts.filter(a=>a.severity==="High").length;
-  const critVulns = d.vulnerabilities?.filter(v=>v.severity==="Critical").length || 0;
-  const openVulns = d.vulnerabilities?.filter(v=>v.status!=="Resolved").length || 0;
-  const avgCompliance = d.compliance ? Math.round(d.compliance.reduce((s,c)=>s+c.score,0)/d.compliance.length) : 82;
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="🛡️" title="No security data yet"
+    message="Connect your security integrations in ⚙️ Settings to populate this dashboard with live data." />;
+  const alerts = d.alerts || [];
+  const critAlerts = alerts.filter(a=>a.severity==="Critical").length;
+  const highAlerts = alerts.filter(a=>a.severity==="High").length;
+  const critVulns = (d.vulns||[]).filter(v=>v.severity==="Critical").length;
+  const openVulns = (d.vulns||[]).length;
+  const avgCompliance = d.compliance ? Math.round(d.compliance.reduce((s,c)=>s+c.score,0)/d.compliance.length) : 0;
 
   return (
     <div>
@@ -362,7 +502,7 @@ function OverviewPage({ data }) {
         <MetricCard icon="🛡️" label="Security Score" value={`${d.score}/100`}
           trend="↑ 3 pts this month" trendUp={true} color={C.primaryLight} />
         <MetricCard icon="🚨" label="Critical Alerts" value={critAlerts}
-          sub={`${highAlerts} High, ${d.alerts.filter(a=>a.severity==="Medium").length} Medium`}
+          sub={`${highAlerts} High, ${alerts.filter(a=>a.severity==="Medium").length} Medium`}
           trend={critAlerts > 0 ? `${critAlerts} require immediate action` : "None active"}
           trendUp={critAlerts === 0} color={critAlerts > 0 ? C.critical : C.ok} />
         <MetricCard icon="🔍" label="Open Vulnerabilities" value={openVulns}
@@ -391,7 +531,7 @@ function OverviewPage({ data }) {
         <Card style={{ padding:20 }}>
           <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>30-Day Security Trend</div>
           <ResponsiveContainer width="100%" height={180}>
-            <AreaChart data={d.trend} margin={{top:5,right:10,left:-20,bottom:0}}>
+            <AreaChart data={d.trendDays||[]} margin={{top:5,right:10,left:-20,bottom:0}}>
               <defs>
                 <linearGradient id="scoreGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor={C.primaryLight} stopOpacity={0.3}/>
@@ -410,11 +550,11 @@ function OverviewPage({ data }) {
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginTop:12 }}>
             <div style={{ background:"#f8fafc", borderRadius:8, padding:"8px 12px" }}>
               <div style={{ fontSize:11, color:C.muted }}>30-day avg alerts</div>
-              <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{Math.round(d.trend.reduce((s,t)=>s+t.alerts,0)/d.trend.length)}</div>
+              <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{(d.trendDays||[]).length ? Math.round((d.trendDays||[]).reduce((s,t)=>s+t.alerts,0)/(d.trendDays||[]).length) : "N/A"}</div>
             </div>
             <div style={{ background:"#f8fafc", borderRadius:8, padding:"8px 12px" }}>
               <div style={{ fontSize:11, color:C.muted }}>Avg open vulns</div>
-              <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{Math.round(d.trend.reduce((s,t)=>s+t.vulns,0)/d.trend.length)}</div>
+              <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{(d.trendDays||[]).length ? Math.round((d.trendDays||[]).reduce((s,t)=>s+t.vulns,0)/(d.trendDays||[]).length) : "N/A"}</div>
             </div>
           </div>
         </Card>
@@ -422,7 +562,7 @@ function OverviewPage({ data }) {
         {/* Risk summary */}
         <Card style={{ padding:20 }}>
           <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Risk by Domain</div>
-          {d.riskByDomain.map(r=>(
+          {(d.riskByDomain||[]).map(r=>(
             <RiskBar key={r.domain} label={r.domain} score={r.score} />
           ))}
         </Card>
@@ -434,7 +574,7 @@ function OverviewPage({ data }) {
         <Card style={{ padding:20 }}>
           <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Active Critical & High Alerts</div>
           <div>
-            {d.alerts.filter(a=>["Critical","High"].includes(a.severity)).slice(0,5).map(a=>(
+            {alerts.filter(a=>["Critical","High"].includes(a.severity)).slice(0,5).map(a=>(
               <div key={a.id} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
                 <div style={{ width:8, height:8, borderRadius:"50%", background:SEVERITY_COLORS[a.severity], marginTop:5, flexShrink:0 }} />
                 <div style={{ flex:1, minWidth:0 }}>
@@ -450,7 +590,7 @@ function OverviewPage({ data }) {
         {/* Compliance */}
         <Card style={{ padding:20 }}>
           <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Compliance Posture</div>
-          {d.compliance.map(c=>(
+          {(d.compliance||[]).map(c=>(
             <div key={c.framework} style={{ marginBottom:14 }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
                 <span style={{ fontSize:13, color:C.text, fontWeight:500 }}>{c.framework}</span>
@@ -472,7 +612,8 @@ function OverviewPage({ data }) {
 
 // ── Risk & Compliance ────────────────────────────────────────────────────────
 function RiskCompliancePage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="⚖️" title="No risk data yet" message="Connect UpGuard and your SIEM/XDR integrations to see risk and compliance data." />;
   return (
     <div>
       <SectionTitle title="Risk & Compliance" subtitle="Detailed risk assessment and regulatory compliance status" />
@@ -488,7 +629,7 @@ function RiskCompliancePage({ data }) {
               <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}
                 formatter={(v)=>[`${v}%`,"Score"]}/>
               <Bar dataKey="score" radius={[0,4,4,0]}>
-                {d.compliance.map((c,i)=><Cell key={i} fill={c.color}/>)}
+                {(d.compliance||[]).map((c,i)=><Cell key={i} fill={c.color}/>)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -511,7 +652,7 @@ function RiskCompliancePage({ data }) {
             ))}
           </div>
           <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:16 }}>
-            {d.riskByDomain.map(r=>(
+            {(d.riskByDomain||[]).map(r=>(
               <div key={r.domain} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0" }}>
                 <span style={{ fontSize:12, color:C.text }}>{r.domain}</span>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
@@ -556,7 +697,8 @@ function RiskCompliancePage({ data }) {
 
 // ── Threat Intelligence ──────────────────────────────────────────────────────
 function ThreatPage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="🎯" title="No threat data yet" message="Connect Taegis XDR or Azure Defender in ⚙️ Settings to see live threat intelligence." />;
   const threatData = [
     {name:"Jan",incidents:3},{name:"Feb",incidents:5},{name:"Mar",incidents:2},{name:"Apr",incidents:8},
     {name:"May",incidents:6},{name:"Jun",incidents:4},
@@ -655,8 +797,9 @@ function ComplianceDot({ status }) {
 }
 
 function CloudPage({ data }) {
-  const d   = data || buildMock();
-  const az  = d.azure || buildMock().azure;
+  const d   = data || {};
+  const az  = d.azure || {};
+  if (!d._hasData || !az.subscriptions) return <NoData icon="☁️" title="No Azure cloud data yet" message="Configure Azure Defender credentials in ⚙️ Settings to see cloud security posture and asset inventory." />;
   const score = az.secureScore || 71;
   const totalResources = az.subscriptions?.reduce((s,x)=>s+x.resources,0) || 222;
   const highRecs = az.recommendations?.filter(r=>r.severity==="High").length || 3;
@@ -780,8 +923,9 @@ function CloudPage({ data }) {
 
 // ── Cloud Security – Analyst View ─────────────────────────────────────────────
 function CloudAnalystPage({ data }) {
-  const d  = data || buildMock();
-  const az = d.azure || buildMock().azure;
+  const d  = data || {};
+  const az = d.azure || {};
+  if (!d._hasData || !az.subscriptions) return <NoData icon="☁️" title="No Azure cloud data yet" message="Configure Azure Defender credentials in ⚙️ Settings to populate the cloud security inventory." />;
   const [tab,    setTab]    = useState("vms");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All");
@@ -1030,11 +1174,11 @@ function CloudAnalystPage({ data }) {
 }
 
 // ── Executive Report ─────────────────────────────────────────────────────────
-// ── Executive Report ─────────────────────────────────────────────────────────
 function ReportPage({ data }) {
-  const d = data || buildMock();
-  const avgCompliance = d.compliance ? Math.round(d.compliance.reduce((s,c)=>s+c.score,0)/d.compliance.length) : 82;
-  const critAlerts = d.alerts.filter(a=>a.severity==="Critical").length;
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="📊" title="No data for report yet" message="Connect your integrations in ⚙️ Settings. Reports generate automatically once data is collected." />;
+  const avgCompliance = (d.compliance||[]).length ? Math.round((d.compliance||[]).reduce((s,c)=>s+c.score,0)/(d.compliance||[]).length) : 0;
+  const critAlerts = (d.alerts||[]).filter(a=>a.severity==="Critical").length;
   const openVulns = d.vulnerabilities?.filter(v=>v.status!=="Resolved").length || 0;
   return (
     <div>
@@ -1057,7 +1201,7 @@ function ReportPage({ data }) {
           <div style={{ fontSize:13, color:C.text, lineHeight:1.8 }}>
             The organisation's overall security posture is rated <strong>MODERATE</strong> with a health score of <strong>{d.score}/100</strong>.
             {" "}The security programme has improved by 3 points over the past month. There are currently <strong>{critAlerts} critical</strong> and{" "}
-            <strong>{d.alerts.filter(a=>a.severity==="High").length} high</strong> severity alerts requiring attention, and <strong>{openVulns} open vulnerabilities</strong>{" "}
+            <strong>{(d.alerts||[]).filter(a=>a.severity==="High").length} high</strong> severity alerts requiring attention, and <strong>{openVulns} open vulnerabilities</strong>{" "}
             across the environment. Average compliance posture across all frameworks stands at <strong>{avgCompliance}%</strong>.
           </div>
         </div>
@@ -1115,12 +1259,14 @@ function ReportPage({ data }) {
 
 // ── Alert Queue ──────────────────────────────────────────────────────────────
 function AlertsPage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="🚨" title="No alerts yet" message="Connect Taegis XDR or Azure Defender in ⚙️ Settings to see live alerts." />;
+  const alertList = d.alerts || [];
   const [filter, setFilter] = useState("All");
   const [search, setSearch] = useState("");
   const [toolFilter, setToolFilter] = useState("All");
   const severities = ["All","Critical","High","Medium","Low"];
-  const filtered = d.alerts.filter(a=>
+  const filtered = (d.alerts||[]).filter(a=>
     (filter==="All"||a.severity===filter) &&
     (toolFilter==="All"||a.tool===toolFilter) &&
     (search===""||a.title.toLowerCase().includes(search.toLowerCase())||a.resource.toLowerCase().includes(search.toLowerCase()))
@@ -1135,7 +1281,7 @@ function AlertsPage({ data }) {
           <button key={s} onClick={()=>setFilter(s)}
             style={{ padding:"10px 6px", borderRadius:8, border:`2px solid ${filter===s?(SEVERITY_COLORS[s]||C.primary):C.border}`,
               background:filter===s?`${SEVERITY_COLORS[s]||C.primary}12`:"white", cursor:"pointer", textAlign:"center" }}>
-            <div style={{ fontSize:18, fontWeight:800, color:SEVERITY_COLORS[s]||C.text }}>{s==="All"?d.alerts.length:counts[s]||0}</div>
+            <div style={{ fontSize:18, fontWeight:800, color:SEVERITY_COLORS[s]||C.text }}>{s==="All"?(d.alerts||[]).length:counts[s]||0}</div>
             <div style={{ fontSize:10, fontWeight:600, color:C.muted, textTransform:"uppercase", letterSpacing:0.5 }}>{s}</div>
           </button>
         ))}
@@ -1186,7 +1332,8 @@ function AlertsPage({ data }) {
 
 // ── Vulnerability Deep Dive ──────────────────────────────────────────────────
 function VulnerabilitiesPage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="🔍" title="No vulnerability data yet" message="Connect Qualys VMDR in ⚙️ Settings to see live vulnerability scan results." />;
   const [sort, setSort] = useState("cvss");
   const vulns = [...(d.vulnerabilities||[])].sort((a,b)=> sort==="cvss"?b.cvss-a.cvss:sort==="age"?b.age-a.age:b.affected-a.affected);
   const bySev = {};
@@ -1261,7 +1408,8 @@ function VulnerabilitiesPage({ data }) {
 
 // ── Firewall Analytics ───────────────────────────────────────────────────────
 function FirewallPage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="🔥" title="No firewall data yet" message="Connect Fortinet or Palo Alto in ⚙️ Settings to see live firewall analytics." />;
   return (
     <div>
       <SectionTitle title="Firewall Analytics – Fortinet & Palo Alto" subtitle="Traffic analysis, policy hits and threat blocking statistics" />
@@ -1337,7 +1485,8 @@ function FirewallPage({ data }) {
 
 // ── Attack Surface ───────────────────────────────────────────────────────────
 function AttackSurfacePage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="🌐" title="No attack surface data yet" message="Connect UpGuard in ⚙️ Settings to see your external attack surface data." />;
   const s = d.surface;
   const gradeColor = s?.grade?.startsWith("A")?C.ok:s?.grade?.startsWith("B")?C.ok:s?.grade?.startsWith("C")?C.warn:C.critical;
   return (
@@ -1386,7 +1535,8 @@ function AttackSurfacePage({ data }) {
 
 // ── Assets & Patches ─────────────────────────────────────────────────────────
 function AssetsPage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="💻" title="No asset data yet" message="Connect ManageEngine in ⚙️ Settings to see live asset and patch management data." />;
   const a = d.assets;
   return (
     <div>
@@ -1446,7 +1596,8 @@ function AssetsPage({ data }) {
 
 // ── SIEM / XDR ───────────────────────────────────────────────────────────────
 function SIEMPage({ data }) {
-  const d = data || buildMock();
+  const d = data || {};
+  if (!d._hasData) return <NoData icon="📡" title="No SIEM / XDR data yet" message="Connect Taegis XDR in ⚙️ Settings to see live SIEM event data." />;
   const [invOpen, setInvOpen] = useState(null);
   return (
     <div>
@@ -1642,16 +1793,22 @@ function IntegrationsPage({ onSave }) {
             {INTERVALS.map(i=><option key={i.value} value={i.value}>Every {i.label}</option>)}
           </select>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
           <button onClick={()=>saveSingle(toolKey)} disabled={saving}
-            style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background:tool.color, color:"white", fontSize:13, fontWeight:700, cursor:"pointer" }}>
-            {saving?"Saving…":"💾 Save Credentials"}
+            style={{ flex:2, padding:"9px 0", borderRadius:8, border:"none", background:tool.color, color:"white", fontSize:13, fontWeight:700, cursor:"pointer" }}>
+            {saving?"Saving…":"💾 Save"}
+          </button>
+          <button onClick={async ()=>{ await saveSingle(toolKey); await testConnection(toolKey); }}
+            disabled={saving||testing===toolKey}
+            style={{ flex:2, padding:"9px 0", borderRadius:8, border:`1px solid ${C.primaryLight}`, background:"white", color:C.primary, fontSize:13, fontWeight:700, cursor:"pointer" }}>
+            {testing===toolKey?"Testing…":"🔗 Save & Test"}
           </button>
           <button onClick={()=>setEditing(null)}
-            style={{ padding:"9px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>
-            Cancel
+            style={{ flex:1, padding:"9px 0", borderRadius:8, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>
+            ✕
           </button>
         </div>
+        <TestResultPanel resultKey={toolKey}/>
       </div>
     );
   }
@@ -1885,10 +2042,12 @@ export default function CybersecurityDashboard() {
       if (dateRange.to)   params.append("to",   dateRange.to);
       const res = await fetch(`${API}/api/snapshot?${params}`);
       if (!res.ok) throw new Error("API error");
-      const d = await res.json();
-      setData(d.data || d);
-    } catch {
-      setData(buildMock());
+      const d   = await res.json();
+      const raw = d.data || d;           // per-tool snapshot map
+      setData(transformSnapshot(raw));   // transform to flat structure
+    } catch (err) {
+      console.warn("Snapshot fetch failed:", err.message);
+      setData({});                       // empty — show "no data" states
     } finally {
       setLoading(false);
       setLastUpdated(new Date());
