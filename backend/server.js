@@ -36,6 +36,39 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+/* ── Simple Qualys XML parser ──────────────────────────────────────────── */
+function parseQualysXML(xml) {
+  if (typeof xml !== "string") return [];
+  const detections = [];
+  const hostRe = /<HOST>([\s\S]*?)<\/HOST>/g;
+  let hostMatch;
+  while ((hostMatch = hostRe.exec(xml)) !== null) {
+    const hostBlock = hostMatch[1];
+    const ip  = (hostBlock.match(/<IP>(.*?)<\/IP>/)    ||[])[1] || "Unknown";
+    const dns = (hostBlock.match(/<DNS>(.*?)<\/DNS>/)  ||[])[1] || ip;
+    const detRe = /<DETECTION>([\s\S]*?)<\/DETECTION>/g;
+    let detMatch;
+    while ((detMatch = detRe.exec(hostBlock)) !== null) {
+      const d = detMatch[1];
+      const get = tag => (d.match(new RegExp(`<${tag}>(.*?)<\/${tag}>`)) ||[])[1] || "";
+      const sev = parseInt(get("SEVERITY")) || 0;
+      detections.push({
+        host:     dns,
+        ip:       ip,
+        qid:      get("QID"),
+        severity: sev >= 5 ? "Critical" : sev === 4 ? "High" : sev === 3 ? "Medium" : "Low",
+        type:     get("TYPE"),
+        status:   get("STATUS"),
+        port:     get("PORT") || "—",
+        title:    get("RESULTS") ? get("RESULTS").slice(0,80) : `QID ${get("QID")}`,
+        lastFound:get("LAST_FOUND_DATETIME") || "",
+        cve:      (d.match(/<CVE_ID>(.*?)<\/CVE_ID>/) ||[])[1] || "",
+      });
+    }
+  }
+  return detections;
+}
+
 async function getCreds(tool) {
   try {
     const r = await pool.query(
@@ -210,7 +243,8 @@ async function collectQualys() {
       `${platform}/api/2.0/fo/asset/host/vm/detection/?action=list&status=New,Active&severities=4,5&truncation_limit=50`,
       { headers }
     );
-    const snap = { source:"qualys", detections: r.data };
+    const parsed = parseQualysXML(r.data);
+    const snap = { source:"qualys", detections: parsed, raw_count: parsed.length };
     await saveSnapshot("qualys", snap);
     await setStatus("qualys", "connected");
     return snap;
@@ -304,36 +338,41 @@ async function scheduleCollectors() {
 // Health
 app.get("/api/health", (_, res) => res.json({ status:"ok", ts: new Date() }));
 
-// Get all integration statuses (credentials returned with secrets masked)
+// Get all integration statuses — returns safe display info only (no secrets)
 app.get("/api/integrations", async (_, res) => {
   try {
-    const r = await pool.query(
-      "SELECT tool_name, enabled, status, last_tested, last_error, refresh_interval, updated_at, credentials FROM integrations ORDER BY tool_name"
-    );
-    const SECRET_KEYS = /apikey|api_key|password|secret|token|clientsecret/i;
-    function safeCreds(creds) {
-      if (!creds || typeof creds !== "object") return {};
-      if (Array.isArray(creds.instances)) {
-        return {
-          instances: creds.instances.map(inst => {
-            const s = {};
-            for (const [k, v] of Object.entries(inst))
-              s[k] = SECRET_KEYS.test(k) ? "●●●●●●" : v;
-            return s;
-          }),
-        };
-      }
-      const s = {};
-      for (const [k, v] of Object.entries(creds))
-        s[k] = SECRET_KEYS.test(k) ? "●●●●●●" : v;
-      return s;
-    }
-    const rows = r.rows.map(row => ({
-      ...row,
-      credentials: safeCreds(row.credentials),
-    }));
-    res.json(rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const r = await pool.query(`
+      SELECT
+        tool_name, enabled, status, last_tested, last_error,
+        refresh_interval, updated_at,
+        -- instance count for multi-instance tools
+        CASE
+          WHEN credentials -> 'instances' IS NOT NULL
+          THEN jsonb_array_length(credentials -> 'instances')
+          ELSE 0
+        END AS instance_count,
+        -- safe display names for instances (name + host only, no secrets)
+        CASE
+          WHEN credentials -> 'instances' IS NOT NULL
+          THEN (
+            SELECT jsonb_agg(
+              jsonb_build_object(
+                'name', elem ->> 'name',
+                'host', COALESCE(elem->>'host', elem->>'tenantId', elem->>'subscriptionId', '')
+              )
+            )
+            FROM jsonb_array_elements(credentials -> 'instances') AS elem
+          )
+          ELSE NULL
+        END AS instances
+      FROM integrations
+      ORDER BY tool_name
+    `);
+    res.json(r.rows);
+  } catch(e) {
+    console.error("GET /api/integrations error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Save credentials
@@ -494,6 +533,19 @@ app.get("/api/kpis", async (req, res) => {
     );
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Collect a single tool on demand
+app.post("/api/collect/:tool", async (req, res) => {
+  const { tool } = req.params;
+  const collectors = {
+    fortinet: collectFortinet, paloalto: collectPaloAlto, upguard: collectUpGuard,
+    azure: collectAzure, qualys: collectQualys, manageengine: collectManageEngine, taegis: collectTaegis,
+  };
+  const fn = collectors[tool];
+  if (!fn) return res.status(404).json({ error: "Unknown tool" });
+  res.json({ ok: true, message: `Collection started for ${tool}` });
+  fn().catch(e => console.error(`Manual collect ${tool}:`, e.message));
 });
 
 // Manual collection trigger

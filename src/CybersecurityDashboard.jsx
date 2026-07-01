@@ -1726,6 +1726,10 @@ function AdminPage() {
       setTestResults(prev => ({ ...prev, [key]: d }));
       showToast(d.success ? `${toolKey} — connected ✅` : `${toolKey} — ${d.error}`, d.success);
       fetchStatuses();
+      // Trigger data collection immediately after successful test
+      if (d.success) {
+        fetch(`${API}/api/collect/${toolKey}`, { method:"POST" }).catch(()=>{});
+      }
     } catch(e) {
       clearTimeout(timer);
       const msg = e.name === "AbortError"
@@ -1848,7 +1852,8 @@ function AdminPage() {
               const st       = statuses[tool.key] || {};
               const cfg      = STATUS_CFG[st.status] || STATUS_CFG.unconfigured;
               const isMulti  = MULTI_INSTANCE_TOOLS.includes(tool.key);
-              const instances= st.credentials?.instances || [];
+              const instances= st.instances || [];
+          const instCount = st.instance_count || 0;
               const interval = st.refresh_interval || 300;
               const mins     = Math.round(interval / 60);
 
@@ -2114,6 +2119,9 @@ function IntegrationsPage({ onSave }) {
       setTestResults(prev => ({ ...prev, [testKey]: data }));
       showToast(data.success ? "Connection successful ✅" : `Test failed: ${data.error}`, data.success);
       loadStatuses();
+      if (data.success) {
+        fetch(`${API}/api/collect/${toolKey}`, { method:"POST" }).catch(()=>{});
+      }
     } catch(e) {
       clearTimeout(timer);
       const msg = e.name === "AbortError"
@@ -2249,7 +2257,8 @@ function IntegrationsPage({ onSave }) {
           const isConn   = st.status === "connected";
           const isConf   = st.status && st.status !== "unconfigured";
           const isMulti  = MULTI_INSTANCE_TOOLS.includes(tool.key);
-          const instances= st.credentials?.instances || [];
+          const instances= st.instances || [];
+          const instCount = st.instance_count || 0;
           const isEditing= editing === tool.key;
 
           return (
