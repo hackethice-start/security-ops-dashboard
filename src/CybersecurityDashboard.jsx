@@ -124,18 +124,50 @@ function transformSnapshot(snap) {
       speed:   i.speed || "",
     }));
 
-    // CIS Benchmark checks derived from config
+    // ── CIS FortiGate Benchmark controls (CIS Fortinet FortiGate Benchmark v1.0) ──
+    const hasDefaultDeny   = mappedPolicies.some(p=>p.action==="Deny"&&p.srcAny&&p.dstAny);
+    const allAllowLogged   = mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.logtraffic&&p.logtraffic!=="disable");
+    const noAnyAny         = !mappedPolicies.some(p=>p.overpermissive&&p.action==="Allow");
+    const noSvcAll         = mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>!p.svcAny);
+    const noUnused         = mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.packets>0);
+    const noDisabled       = mappedPolicies.every(p=>p.status==="Enabled");
+    const httpsOnly        = sys.admin_https_redirect !== "disable";
+    const sshPortNonDef    = sys.admin_ssh_port ? sys.admin_ssh_port !== 22 : null;
+    const httpsMgmtOnly    = sys.admintimeout ? true : null; // session timeout configured
+    const ntpConfigured    = sys.ntpserver ? true : null;
+    const hasAdminTimeout  = sys.admintimeout && sys.admintimeout <= 15;
     const cisBenchmark = [
-      { id:"CIS-1.1", category:"Access Control",    check:"Management access restricted (no 'any' src on admin policies)", pass: mappedPolicies.filter(p=>p.name?.toLowerCase().includes("admin")||p.name?.toLowerCase().includes("mgmt")).every(p=>!p.srcAny) },
-      { id:"CIS-1.2", category:"Access Control",    check:"Default deny policy exists",            pass: mappedPolicies.some(p=>p.action==="Deny"&&p.srcAny&&p.dstAny) },
-      { id:"CIS-2.1", category:"Logging",            check:"Logging enabled on all allow policies", pass: mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.logtraffic&&p.logtraffic!=="disable") },
-      { id:"CIS-2.2", category:"Logging",            check:"No disabled policies present",          pass: mappedPolicies.every(p=>p.status==="Enabled") },
-      { id:"CIS-3.1", category:"Rule Hygiene",       check:"No unused rules (zero hits)",           pass: mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.packets>0) },
-      { id:"CIS-3.2", category:"Rule Hygiene",       check:"No overly permissive any-any rules",    pass: !mappedPolicies.some(p=>p.overpermissive&&p.action==="Allow") },
-      { id:"CIS-3.3", category:"Rule Hygiene",       check:"Services restricted (no ALL on allow policies)", pass: mappedPolicies.filter(p=>p.action==="Allow").every(p=>!p.svcAny) },
-      { id:"CIS-4.1", category:"System Hardening",  check:"Admin HTTPS-only access (no HTTP mgmt)", pass: sys.admin_https_redirect!=="disable" },
-      { id:"CIS-4.2", category:"System Hardening",  check:"SSH management port non-default or disabled", pass: sys.admin_ssh_port ? sys.admin_ssh_port!==22 : null },
-      { id:"CIS-5.1", category:"Network Security",  check:"Split DNS configured",                  pass: null },  // requires DNS config check
+      // ── 1. Account & Access Management ──────────────────────────────────
+      { id:"1.1",  category:"Account Management",  check:"Ensure admin session timeout is 15 minutes or less",           pass: sys.admintimeout ? sys.admintimeout <= 15 : null,   remediation:"Set: config system global → set admintimeout 15" },
+      { id:"1.2",  category:"Account Management",  check:"Ensure HTTPS-only management access (HTTP redirected to HTTPS)",pass: httpsOnly,                                           remediation:"Set: config system global → set admin-https-redirect enable" },
+      { id:"1.3",  category:"Account Management",  check:"Ensure SSH management uses non-default port (not 22)",          pass: sshPortNonDef,                                       remediation:"Set: config system global → set admin-ssh-port <non-22>" },
+      { id:"1.4",  category:"Account Management",  check:"Ensure management access restricted to trusted IPs only",       pass: mappedPolicies.filter(p=>p.name?.toLowerCase().match(/mgmt|admin|manage/)).every(p=>!p.srcAny)||null, remediation:"Create dedicated management policy with specific src addresses" },
+      { id:"1.5",  category:"Account Management",  check:"Ensure pre-login banner is configured",                         pass: sys.pre_login_banner === "enable" ? true : sys.pre_login_banner ? null : false, remediation:"Set: config system global → set pre-login-banner enable" },
+      { id:"1.6",  category:"Account Management",  check:"Ensure post-login banner is configured",                        pass: sys.post_login_banner === "enable" ? true : null,    remediation:"Set: config system global → set post-login-banner enable" },
+      // ── 2. Network Security ─────────────────────────────────────────────
+      { id:"2.1",  category:"Network Security",    check:"Ensure NTP server is configured",                               pass: ntpConfigured,                                       remediation:"Set: config system ntp → set server <ntp-server>" },
+      { id:"2.2",  category:"Network Security",    check:"Ensure DNS servers are explicitly configured",                  pass: sys.primary_dns ? true : null,                       remediation:"Set: config system dns → set primary <ip>" },
+      { id:"2.3",  category:"Network Security",    check:"Ensure SNMP v1/v2 is disabled (use SNMPv3 only)",               pass: null,                                                remediation:"Disable SNMPv1/v2: config system snmp community → delete all" },
+      // ── 3. Logging & Monitoring ─────────────────────────────────────────
+      { id:"3.1",  category:"Logging",             check:"Ensure traffic logging enabled on all allow policies",           pass: allAllowLogged,                                      remediation:"Set logtraffic=all on each allow policy" },
+      { id:"3.2",  category:"Logging",             check:"Ensure syslog server is configured",                            pass: null,                                                remediation:"config log syslogd setting → set status enable → set server <ip>" },
+      { id:"3.3",  category:"Logging",             check:"Ensure logging is set to record all event types",               pass: null,                                                remediation:"config log setting → set faz-override enable" },
+      { id:"3.4",  category:"Logging",             check:"Ensure IPS logging is enabled",                                 pass: null,                                                remediation:"Enable IPS sensor with logging on all relevant policies" },
+      // ── 4. Firewall Policy ──────────────────────────────────────────────
+      { id:"4.1",  category:"Firewall Policy",     check:"Ensure default deny-all policy exists",                         pass: hasDefaultDeny,                                      remediation:"Add a deny-all policy at the bottom of the policy list" },
+      { id:"4.2",  category:"Firewall Policy",     check:"Ensure no any→any allow rules exist",                           pass: noAnyAny,                                            remediation:"Replace any/any source-destination with specific addresses" },
+      { id:"4.3",  category:"Firewall Policy",     check:"Ensure services are explicitly defined (no ALL service object)", pass: noSvcAll,                                           remediation:"Replace ALL service with specific application/port definitions" },
+      { id:"4.4",  category:"Firewall Policy",     check:"Ensure no unused (zero-hit) allow rules exist",                 pass: noUnused,                                            remediation:"Review and remove allow policies with zero packet hits" },
+      { id:"4.5",  category:"Firewall Policy",     check:"Ensure all allow policies have security profiles applied",       pass: mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.profile)||null, remediation:"Apply AV, IPS, App Control profiles to all allow policies" },
+      { id:"4.6",  category:"Firewall Policy",     check:"Ensure disabled policies are reviewed and removed",             pass: noDisabled,                                          remediation:"Remove or enable disabled policies after review" },
+      // ── 5. System Hardening ─────────────────────────────────────────────
+      { id:"5.1",  category:"System Hardening",    check:"Ensure auto-update for FortiGuard AV/IPS signatures is enabled",pass: null,                                               remediation:"config system autoupdate schedule → set status enable" },
+      { id:"5.2",  category:"System Hardening",    check:"Ensure firmware is current (latest stable release)",            pass: null,                                                remediation:"Check FortiGuard: System → Firmware → upgrade to latest" },
+      { id:"5.3",  category:"System Hardening",    check:"Ensure USB management port is disabled",                        pass: sys.usb_auto_install === "disable" ? true : sys.usb_auto_install ? false : null, remediation:"config system global → set usb-auto-install disable" },
+      { id:"5.4",  category:"System Hardening",    check:"Ensure FortiGuard web filtering is licensed and active",        pass: null,                                                remediation:"Verify FortiGuard license: System → FortiGuard → Web Filter" },
+      // ── 6. VPN ──────────────────────────────────────────────────────────
+      { id:"6.1",  category:"VPN",                 check:"Ensure IKEv2 is used for IPsec VPN (not IKEv1)",               pass: null,                                                remediation:"Set keylife and use IKEv2 in VPN phase1 config" },
+      { id:"6.2",  category:"VPN",                 check:"Ensure SSL-VPN uses strong TLS version (TLS 1.2+)",             pass: null,                                                remediation:"config vpn ssl settings → set tlsv1-2 enable → set tlsv1-0 disable" },
     ];
 
     return {
@@ -187,14 +219,51 @@ function transformSnapshot(snap) {
       };
     });
 
+    // ── CIS Palo Alto Networks Firewall Benchmark controls (CIS PAN-OS v1.0) ──
+    const paHasDefaultDeny = mappedRules.some(r=>r.action==="Deny"&&r.srcAny&&r.dstAny);
+    const paAllLogged      = mappedRules.filter(r=>r.action==="Allow"&&r.status==="Enabled").every(r=>r.logtraffic==="enable");
+    const paNoAnyAny       = !mappedRules.some(r=>r.overpermissive&&r.action==="Allow");
+    const paNoSvcAny       = mappedRules.filter(r=>r.action==="Allow"&&r.status==="Enabled").every(r=>!r.svcAny);
     const cisBenchmark = [
-      { id:"CIS-1.1", category:"Access Control",   check:"Management access restricted", pass: mappedRules.filter(r=>r.name?.toLowerCase().includes("mgmt")||r.name?.toLowerCase().includes("admin")).every(r=>!r.srcAny) },
-      { id:"CIS-1.2", category:"Access Control",   check:"Default deny policy exists",   pass: mappedRules.some(r=>r.action==="Deny"&&r.srcAny&&r.dstAny) },
-      { id:"CIS-2.1", category:"Logging",           check:"Logging enabled on allow rules", pass: mappedRules.filter(r=>r.action==="Allow"&&r.status==="Enabled").every(r=>r.logtraffic==="enable") },
-      { id:"CIS-3.1", category:"Rule Hygiene",      check:"No overly permissive any-any rules", pass: !mappedRules.some(r=>r.overpermissive&&r.action==="Allow") },
-      { id:"CIS-3.2", category:"Rule Hygiene",      check:"Services not set to any on allow rules", pass: mappedRules.filter(r=>r.action==="Allow").every(r=>!r.svcAny) },
-      { id:"CIS-4.1", category:"System Hardening", check:"PAN-OS version current", pass: null },
-      { id:"CIS-5.1", category:"Network Security", check:"Zones properly segregated", pass: null },
+      // ── 1. Management Interface ─────────────────────────────────────────
+      { id:"1.1",  category:"Management",          check:"Ensure HTTPS-only access to management interface",              pass: null, remediation:"Device → Setup → Management → Management Interface Services → uncheck HTTP" },
+      { id:"1.2",  category:"Management",          check:"Ensure Telnet access to management interface is disabled",      pass: null, remediation:"Device → Setup → Management → uncheck Telnet" },
+      { id:"1.3",  category:"Management",          check:"Ensure SSH management uses non-default port",                   pass: sys.hostname ? null : null, remediation:"Device → Setup → Management → set SSH port to non-22" },
+      { id:"1.4",  category:"Management",          check:"Ensure permitted IP addresses configured for management",       pass: null, remediation:"Device → Setup → Management → Permitted IP Addresses → add trusted IPs" },
+      { id:"1.5",  category:"Management",          check:"Ensure idle session timeout is 10 minutes or less",            pass: null, remediation:"Device → Setup → Management → set Idle Timeout ≤ 10 min" },
+      { id:"1.6",  category:"Management",          check:"Ensure login banners are configured",                           pass: null, remediation:"Device → Setup → Management → Login Banner → configure warning message" },
+      // ── 2. Authentication ───────────────────────────────────────────────
+      { id:"2.1",  category:"Authentication",      check:"Ensure minimum password complexity requirements are enforced",  pass: null, remediation:"Device → Setup → Management → Minimum Password Complexity → enable" },
+      { id:"2.2",  category:"Authentication",      check:"Ensure account lockout is configured (max 3 failed attempts)",  pass: null, remediation:"Device → Setup → Management → Failed Attempts = 3; Lockout Time ≥ 30 min" },
+      { id:"2.3",  category:"Authentication",      check:"Ensure MFA is enforced for administrator accounts",             pass: null, remediation:"Device → Authentication Profile → add MFA (Duo/RADIUS/SAML)" },
+      { id:"2.4",  category:"Authentication",      check:"Ensure RADIUS/LDAP/SAML used for admin authentication",        pass: null, remediation:"Device → Server Profiles → configure external auth server" },
+      // ── 3. Logging & Monitoring ─────────────────────────────────────────
+      { id:"3.1",  category:"Logging",             check:"Ensure syslog forwarding is configured",                        pass: null, remediation:"Device → Server Profiles → Syslog → configure syslog server" },
+      { id:"3.2",  category:"Logging",             check:"Ensure log forwarding profile applied to all security rules",   pass: paAllLogged, remediation:"Add Log Forwarding Profile to every security policy rule" },
+      { id:"3.3",  category:"Logging",             check:"Ensure 'Log at Session End' enabled on all allow rules",        pass: mappedRules.filter(r=>r.action==="Allow"&&r.status==="Enabled").every(r=>r.logtraffic==="enable"), remediation:"Security policy → each Allow rule → Log at Session End = enabled" },
+      { id:"3.4",  category:"Logging",             check:"Ensure threat logs are forwarded to SIEM",                      pass: null, remediation:"Objects → Log Forwarding → configure threat log forwarding" },
+      // ── 4. Security Profiles ────────────────────────────────────────────
+      { id:"4.1",  category:"Security Profiles",   check:"Ensure Antivirus profile applied to all allow rules",           pass: null, remediation:"Objects → Security Profiles → Antivirus → attach to all allow policies" },
+      { id:"4.2",  category:"Security Profiles",   check:"Ensure Anti-Spyware profile applied to all allow rules",        pass: null, remediation:"Objects → Security Profiles → Anti-Spyware → attach to all allow policies" },
+      { id:"4.3",  category:"Security Profiles",   check:"Ensure Vulnerability Protection profile applied",               pass: null, remediation:"Objects → Security Profiles → Vulnerability Protection → attach to policies" },
+      { id:"4.4",  category:"Security Profiles",   check:"Ensure URL Filtering profile applied to outbound traffic",      pass: null, remediation:"Objects → Security Profiles → URL Filtering → attach to outbound policies" },
+      { id:"4.5",  category:"Security Profiles",   check:"Ensure File Blocking profile applied to all allow rules",       pass: null, remediation:"Objects → Security Profiles → File Blocking → attach to allow policies" },
+      { id:"4.6",  category:"Security Profiles",   check:"Ensure WildFire analysis profile is applied",                   pass: null, remediation:"Objects → Security Profiles → WildFire Analysis → attach to policies" },
+      // ── 5. Security Policy ──────────────────────────────────────────────
+      { id:"5.1",  category:"Security Policy",     check:"Ensure default deny-all rule exists at bottom of policy",       pass: paHasDefaultDeny, remediation:"Add a deny-all rule (any→any, action=deny) at the end of the ruleset" },
+      { id:"5.2",  category:"Security Policy",     check:"Ensure no any-to-any allow rules exist",                        pass: paNoAnyAny,      remediation:"Replace any/any source-destination with specific address objects" },
+      { id:"5.3",  category:"Security Policy",     check:"Ensure services not set to 'any' on allow rules",               pass: paNoSvcAny,      remediation:"Replace 'any' service with specific application or port definitions" },
+      { id:"5.4",  category:"Security Policy",     check:"Ensure all security rules have a description",                  pass: mappedRules.every(r=>r.description||null),  remediation:"Add description to each security rule for audit trail" },
+      { id:"5.5",  category:"Security Policy",     check:"Ensure disabled rules are reviewed and removed",                pass: mappedRules.every(r=>r.status==="Enabled"),  remediation:"Review and remove or re-enable all disabled security rules" },
+      // ── 6. Network Security ─────────────────────────────────────────────
+      { id:"6.1",  category:"Network Security",    check:"Ensure Zone Protection profiles are applied to all zones",      pass: null, remediation:"Network → Zones → attach Zone Protection Profile to each zone" },
+      { id:"6.2",  category:"Network Security",    check:"Ensure DoS Protection policies are configured",                 pass: null, remediation:"Policies → DoS Protection → create rules for critical segments" },
+      { id:"6.3",  category:"Network Security",    check:"Ensure Packet-Based Attack Protection is enabled in zone profile", pass: null, remediation:"Network → Zone Protection → enable Flood, Reconnaissance, Packet-Based protection" },
+      // ── 7. PAN-OS Updates ───────────────────────────────────────────────
+      { id:"7.1",  category:"System Hardening",    check:"Ensure PAN-OS is on the latest supported release",             pass: null, remediation:"Device → Dynamic Updates → check for and install latest PAN-OS" },
+      { id:"7.2",  category:"System Hardening",    check:"Ensure Antivirus and WildFire updates are scheduled",           pass: null, remediation:"Device → Dynamic Updates → Antivirus → set schedule to every 30 min" },
+      { id:"7.3",  category:"System Hardening",    check:"Ensure NTP is configured with at least two servers",            pass: null, remediation:"Device → Setup → Services → NTP Servers → add primary + secondary" },
+      { id:"7.4",  category:"System Hardening",    check:"Ensure FIPS-CC mode is enabled if required",                   pass: null, remediation:"Device → Setup → Management → FIPS-CC Mode (if compliance required)" },
     ];
 
     return {
@@ -217,8 +286,13 @@ function transformSnapshot(snap) {
   }
 
   // Build list of all firewall instances for the selector
+  // Fortinet snap: { instances:[{source,vendor,instance,host,policies,stats,...},...] }
+  // PaloAlto snap: { source, vendor, rules, interfaces, sysInfo }
+  const ftInstanceList = Array.isArray(ft.instances) && ft.instances.length > 0
+    ? ft.instances                    // new multi-instance format
+    : (ft && Object.keys(ft).filter(k=>k!=="source"&&k!=="instances").length ? [ft] : []); // legacy single
   const firewallInstances = [
-    ...(ft && Object.keys(ft).length ? [buildFortinetInstance(ft)] : []),
+    ...ftInstanceList.map(inst => buildFortinetInstance(inst)),
     ...(pa && Object.keys(pa).length ? [buildPaloAltoInstance(pa)] : []),
   ];
 
@@ -257,14 +331,21 @@ function transformSnapshot(snap) {
   // Backend returns: { risks: { risks: [...] }, breachsight: { score: N } }
   const ugRisksArr  = Array.isArray(ug.risks?.risks) ? ug.risks.risks : [];
   const ugScore     = ug.breachsight?.score ?? ug.risks?.score ?? null;
-  const ugGrade = ugScore === null ? null
-    : ugScore >= 90 ? "A" : ugScore >= 80 ? "B+" : ugScore >= 70 ? "B"
-    : ugScore >= 60 ? "C+" : ugScore >= 50 ? "C" : "D";
+  const ugGrade     = ug.breachsight?.grade ?? (
+    ugScore === null ? null
+    : ugScore >= 900 ? "A" : ugScore >= 800 ? "B+" : ugScore >= 700 ? "B"
+    : ugScore >= 600 ? "C+" : ugScore >= 500 ? "C" : "D"
+  );
+  // UpGuard scores can be 0-950 scale — normalise to 0-100 for display
+  const ugScoreDisplay = ugScore !== null ? (ugScore > 100 ? Math.round(ugScore/9.5) : ugScore) : null;
+
+  // Domain count from /domains endpoint
+  const ugDomains = Array.isArray(ug.domains?.domains) ? ug.domains.domains : [];
   const risks = { risks: ugRisksArr, score: ugScore };   // kept for backward compat
 
   // Map to the shape AttackSurfacePage reads (d.surface)
   const surface = ugScore !== null || ugRisksArr.length > 0 ? {
-    score:    ugScore ?? 0,
+    score:    ugScoreDisplay ?? 0,
     grade:    ugGrade ?? "N/A",
     findings: ugRisksArr.map(r => ({
       severity: r.severity
@@ -276,8 +357,10 @@ function transformSnapshot(snap) {
         ? new Date(r.firstDetected).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})
         : "—",
     })),
-    // Domain/IP counts not available from /risks — leave null so UI shows "—"
-    domains: null, subdomains: null, openPorts: null, ipRanges: null,
+    domains:    ugDomains.length || null,
+    subdomains: null,
+    openPorts:  null,
+    ipRanges:   null,
   } : null;
 
   // ── Azure (flatten secureScore to a number) ──────────────────────────────
@@ -1974,49 +2057,90 @@ function FirewallPage({ data }) {
         {/* ════ CIS BENCHMARK TAB ════ */}
         {tab==="cis" && (
           <div>
-            <Card style={{ padding:20, marginBottom:16, display:"flex", alignItems:"center", gap:24, flexWrap:"wrap" }}>
-              <div style={{ textAlign:"center" }}>
-                <div style={{ fontSize:52, fontWeight:900, color:cisScore>=80?C.ok:cisScore>=60?C.warn:C.critical, lineHeight:1 }}>{cisScore??0}%</div>
-                <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>CIS Score</div>
-              </div>
-              <div style={{ flex:1 }}>
-                <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>CIS Firewall Benchmark – Configuration Review</div>
-                <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>Based on CIS Benchmark controls for firewall configuration. Checks are derived from live policy config pulled via API.</div>
-                <div style={{ display:"flex", gap:16 }}>
-                  <span style={{ fontSize:12, color:C.ok, fontWeight:700 }}>✓ {cisPass} Passing</span>
-                  <span style={{ fontSize:12, color:C.critical, fontWeight:700 }}>✗ {cisFail} Failing</span>
-                  <span style={{ fontSize:12, color:C.muted, fontWeight:700 }}>? {cisUnknown} Requires manual review</span>
+            {/* Header score card */}
+            <Card style={{ padding:20, marginBottom:16 }}>
+              <div style={{ display:"flex", gap:24, alignItems:"center", flexWrap:"wrap" }}>
+                <div style={{ textAlign:"center", minWidth:100 }}>
+                  <div style={{ fontSize:52, fontWeight:900, lineHeight:1, color:cisScore>=80?C.ok:cisScore>=60?C.warn:C.critical }}>{cisScore??0}%</div>
+                  <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>CIS Score</div>
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:15, fontWeight:700, color:C.text, marginBottom:4 }}>
+                    {fw.vendor==="fortinet"?"CIS FortiGate Benchmark v1.0":"CIS Palo Alto Networks Firewall Benchmark v1.0"} — Configuration Review
+                  </div>
+                  <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>
+                    Automated checks derived from live configuration via API. Controls marked N/A require manual verification in the device console.
+                  </div>
+                  <div style={{ display:"flex", gap:16, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:13, color:C.ok,       fontWeight:700 }}>✓ {cisPass} Passing</span>
+                    <span style={{ fontSize:13, color:C.critical, fontWeight:700 }}>✗ {cisFail} Failing</span>
+                    <span style={{ fontSize:13, color:C.muted,    fontWeight:700 }}>? {cisUnknown} Manual review</span>
+                    <span style={{ fontSize:13, color:C.text,     fontWeight:700 }}>∑ {cis.length} Total controls</span>
+                  </div>
+                </div>
+                <div style={{ width:180 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:C.muted, marginBottom:4 }}>
+                    <span>Compliance</span><span>{cisScore??0}%</span>
+                  </div>
+                  <div style={{ height:10, background:C.border, borderRadius:5, overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${cisScore??0}%`, background:cisScore>=80?C.ok:cisScore>=60?C.warn:C.critical, borderRadius:5 }}/>
+                  </div>
+                  <div style={{ fontSize:10, color:C.muted, marginTop:6, textAlign:"center" }}>
+                    {cisScore>=80?"Good posture — keep reviewing":"Remediation recommended"}
+                  </div>
                 </div>
               </div>
             </Card>
-            {["Access Control","Logging","Rule Hygiene","System Hardening","Network Security"].map(cat => {
+
+            {/* Category accordions */}
+            {[...new Set(cis.map(c=>c.category))].map(cat => {
               const checks = cis.filter(c=>c.category===cat);
-              if (!checks.length) return null;
+              const catPass = checks.filter(c=>c.pass===true).length;
+              const catFail = checks.filter(c=>c.pass===false).length;
+              const catIcon = {
+                "Account Management":"🔐","Management":"🔐","Authentication":"🛡️",
+                "Logging":"📋","Firewall Policy":"🔥","Security Policy":"🔥",
+                "Security Profiles":"🛡️","Rule Hygiene":"🧹","System Hardening":"⚙️",
+                "Network Security":"🌐","VPN":"🔒",
+              }[cat] || "📌";
               return (
-                <Card key={cat} style={{ padding:20, marginBottom:12 }}>
-                  <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:12, display:"flex", alignItems:"center", gap:8 }}>
-                    <span>{{  "Access Control":"🔐","Logging":"📋","Rule Hygiene":"🧹","System Hardening":"⚙️","Network Security":"🌐" }[cat]}</span>
-                    {cat}
-                    <span style={{ fontSize:11, color:C.muted, fontWeight:400 }}>— {checks.filter(c=>c.pass===true).length}/{checks.length} passing</span>
+                <Card key={cat} style={{ padding:0, marginBottom:10, overflow:"hidden" }}>
+                  <div style={{ padding:"14px 20px", background: catFail>0?"#fffbeb":"#f8fafc", borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", gap:10 }}>
+                    <span style={{ fontSize:18 }}>{catIcon}</span>
+                    <span style={{ fontSize:13, fontWeight:700, color:C.text, flex:1 }}>{cat}</span>
+                    <span style={{ fontSize:11, padding:"2px 8px", borderRadius:8, background:catFail===0?"#f0fdf4":"#fef2f2", color:catFail===0?C.ok:C.critical, fontWeight:700 }}>
+                      {catPass}/{checks.length} passing
+                    </span>
                   </div>
-                  {checks.map(c=>(
-                    <div key={c.id} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
-                      <div style={{ width:20, height:20, borderRadius:"50%", background:c.pass===true?"#f0fdf4":c.pass===false?"#fef2f2":"#f8fafc", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, flexShrink:0, marginTop:1 }}>
-                        {c.pass===true?"✓":c.pass===false?"✗":"?"}
+                  <div style={{ padding:"0 20px" }}>
+                    {checks.map((c,i)=>(
+                      <div key={c.id} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"12px 0", borderBottom: i<checks.length-1?`1px solid ${C.border}`:"none" }}>
+                        <div style={{ width:22, height:22, borderRadius:"50%", flexShrink:0, marginTop:1, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700,
+                          background:c.pass===true?"#dcfce7":c.pass===false?"#fee2e2":"#f1f5f9",
+                          color:c.pass===true?C.ok:c.pass===false?C.critical:C.muted }}>
+                          {c.pass===true?"✓":c.pass===false?"✗":"?"}
+                        </div>
+                        <div style={{ flex:1 }}>
+                          <div style={{ fontSize:12, fontWeight:600, color:C.text, marginBottom:2 }}>
+                            <span style={{ color:C.muted, fontWeight:400, marginRight:6 }}>{c.id}</span>{c.check}
+                          </div>
+                          {c.pass===false && c.remediation && (
+                            <div style={{ fontSize:11, color:"#92400e", background:"#fffbeb", padding:"4px 8px", borderRadius:6, marginTop:4 }}>
+                              🔧 <strong>Remediation:</strong> {c.remediation}
+                            </div>
+                          )}
+                          {c.pass===null && (
+                            <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>Requires manual verification in device console</div>
+                          )}
+                        </div>
+                        <span style={{ fontSize:10, fontWeight:700, padding:"3px 9px", borderRadius:8, flexShrink:0, whiteSpace:"nowrap",
+                          background:c.pass===true?"#dcfce7":c.pass===false?"#fee2e2":"#f1f5f9",
+                          color:c.pass===true?C.ok:c.pass===false?C.critical:C.muted }}>
+                          {c.pass===true?"PASS":c.pass===false?"FAIL":"N/A"}
+                        </span>
                       </div>
-                      <div style={{ flex:1 }}>
-                        <div style={{ fontSize:12, fontWeight:600, color:C.text }}>{c.id}: {c.check}</div>
-                        {c.pass===false && <div style={{ fontSize:11, color:C.critical, marginTop:2 }}>⚠️ Control not met — review and remediate</div>}
-                        {c.pass===null  && <div style={{ fontSize:11, color:C.muted,    marginTop:2 }}>Requires manual review — cannot be determined via API</div>}
-                        {c.pass===true  && <div style={{ fontSize:11, color:C.ok,      marginTop:2 }}>Compliant</div>}
-                      </div>
-                      <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:8, flexShrink:0,
-                        background:c.pass===true?"#f0fdf4":c.pass===false?"#fef2f2":"#f8fafc",
-                        color:c.pass===true?C.ok:c.pass===false?C.critical:C.muted }}>
-                        {c.pass===true?"PASS":c.pass===false?"FAIL":"N/A"}
-                      </span>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </Card>
               );
             })}

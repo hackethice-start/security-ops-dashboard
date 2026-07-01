@@ -64,25 +64,40 @@ function parseQualysXML(xml) {
   let hostMatch;
   while ((hostMatch = hostRe.exec(xml)) !== null) {
     const hostBlock = hostMatch[1];
-    const ip  = (hostBlock.match(/<IP>(.*?)<\/IP>/)    ||[])[1] || "Unknown";
-    const dns = (hostBlock.match(/<DNS>(.*?)<\/DNS>/)  ||[])[1] || ip;
+    const ip  = (hostBlock.match(/<IP>(.*?)<\/IP>/)                    ||[])[1]?.trim() || "Unknown";
+    // Qualys VMDR uses <DNS_DATA><HOSTNAME> or <DNS> depending on API version
+    const dns = (hostBlock.match(/<HOSTNAME>(.*?)<\/HOSTNAME>/)         ||
+                 hostBlock.match(/<DNS>(.*?)<\/DNS>/)                   ||
+                 hostBlock.match(/<NETBIOS>(.*?)<\/NETBIOS>/)           ||[])[1]?.trim() || ip;
     const detRe = /<DETECTION>([\s\S]*?)<\/DETECTION>/g;
     let detMatch;
     while ((detMatch = detRe.exec(hostBlock)) !== null) {
       const d = detMatch[1];
-      const get = tag => (d.match(new RegExp(`<${tag}>(.*?)<\/${tag}>`)) ||[])[1] || "";
+      // get() strips nested tags so <RESULTS><![CDATA[...]]></RESULTS> works too
+      const get = tag => {
+        const m = d.match(new RegExp(`<${tag}(?:[^>]*)>([\s\S]*?)<\/${tag}>`));
+        return m ? m[1].replace(/<!\[CDATA\[|\]\]>/g,"").replace(/<[^>]+>/g,"").trim() : "";
+      };
       const sev = parseInt(get("SEVERITY")) || 0;
+      const qid = get("QID");
+      const results = get("RESULTS");
+      const title   = get("QID_TITLE") || (results ? results.slice(0,100) : `QID ${qid}`);
+      const cveM    = d.match(/<CVE[^>]*>[\s\S]*?<ID>(.*?)<\/ID>/) ||
+                      d.match(/<CVE_ID>(.*?)<\/CVE_ID>/);
       detections.push({
-        host:     dns,
-        ip:       ip,
-        qid:      get("QID"),
-        severity: sev >= 5 ? "Critical" : sev === 4 ? "High" : sev === 3 ? "Medium" : "Low",
-        type:     get("TYPE"),
-        status:   get("STATUS"),
-        port:     get("PORT") || "—",
-        title:    get("RESULTS") ? get("RESULTS").slice(0,80) : `QID ${get("QID")}`,
-        lastFound:get("LAST_FOUND_DATETIME") || "",
-        cve:      (d.match(/<CVE_ID>(.*?)<\/CVE_ID>/) ||[])[1] || "",
+        host:      dns,
+        ip,
+        qid,
+        severity:  sev >= 5 ? "Critical" : sev === 4 ? "High" : sev === 3 ? "Medium" : sev === 2 ? "Low" : "Info",
+        type:      get("TYPE"),
+        status:    get("STATUS") || "Active",
+        port:      get("PORT") || "—",
+        protocol:  get("PROTOCOL") || "",
+        title,
+        lastFound: get("LAST_FOUND_DATETIME") || get("LAST_UPDATE_DATETIME") || "",
+        firstFound:get("FIRST_FOUND_DATETIME") || "",
+        cve:       cveM ? cveM[1].trim() : "",
+        ssl:       get("SSL") === "1",
       });
     }
   }
@@ -196,12 +211,16 @@ async function collectFortinet() {
     for (const inst of instances) {
       try {
         const snap = await collectFortinetInstance(inst);
-        await saveSnapshot("fortinet", snap);
         results.push(snap);
       } catch(e) { console.error(`Fortinet instance ${inst.name||inst.host} error:`, e.message); }
     }
-    await setStatus("fortinet", results.length > 0 ? "connected" : "error",
-      results.length === 0 ? "All instances failed" : null);
+    // Save ALL instances together so multi-instance snapshots don't overwrite each other
+    if (results.length > 0) {
+      await saveSnapshot("fortinet", { source:"fortinet", instances: results });
+      await setStatus("fortinet", "connected");
+    } else {
+      await setStatus("fortinet", "error", "All instances failed to connect");
+    }
     return results;
   } catch(e) {
     await setStatus("fortinet", "error", e.message);
@@ -283,14 +302,16 @@ async function collectUpGuard() {
     // Endpoint: /api/public/risks (no v1 in path)
     const headers = { Authorization: c.apikey };
     const base = "https://cyber-risk.upguard.com/api/public";
-    const [risksRes, scoreRes] = await Promise.all([
+    const [risksRes, scoreRes, domainsRes] = await Promise.all([
       http.get(`${base}/risks`, { headers }),
       http.get(`${base}/breachsight`, { headers }).catch(() => ({ data: {} })),
+      http.get(`${base}/domains`, { headers }).catch(() => ({ data: {} })),
     ]);
     const snap = {
-      source: "upguard",
-      risks: risksRes.data || {},
-      breachsight: scoreRes.data || {},
+      source:      "upguard",
+      risks:       risksRes.data   || {},   // { risks:[{id,finding,severity,hostnames,...}] }
+      breachsight: scoreRes.data   || {},   // { score:N, grade:"A" } — may 404 on some plans
+      domains:     domainsRes.data || {},   // { domains:[{hostname,...}] }
     };
     await saveSnapshot("upguard", snap);
     await setStatus("upguard", "connected");
