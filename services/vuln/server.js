@@ -108,10 +108,12 @@ async function runNmap(target, profile) {
 }
 
 async function runZAP(target, profile) {
+  // First try Docker-internal ZAProxy container; fall back to user-configured creds
   const creds = await getCreds("zaproxy").catch(() => null);
-  if (!creds) return { tool:"zaproxy", success:false, error:"ZAProxy not configured in Settings" };
-  const zapUrl = `http://${creds.host || "localhost"}:${creds.port || 8080}`;
-  const apiKey = creds.api_key || "";
+  const zapUrl = (creds?.host && creds.host !== "localhost")
+    ? `http://${creds.host}:${creds.port || 8080}`
+    : ZAP_URL;
+  const apiKey = creds?.api_key || ZAP_API_KEY;
   try {
     await axios.get(`${zapUrl}/JSON/spider/action/scan/?apikey=${apiKey}&url=${encodeURIComponent(target)}&maxChildren=10`);
     await new Promise(r => setTimeout(r, profile === "quick" ? 15000 : 30000));
@@ -188,19 +190,68 @@ async function runQualys(target) {
   }
 }
 
-async function runKali(target, profile, customCmd) {
-  const creds = await getCreds("kali").catch(() => null);
-  if (!creds) return { tool:"kali", success:false, error:"Kali Linux not configured in Settings" };
-  const sshBase = `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${creds.port || 22} ${creds.username}@${creds.host}`;
-  const cmd = customCmd || (profile === "web"
-    ? `nikto -h ${target} 2>&1 | head -100`
-    : `nmap -sV -sC --script vuln -T4 ${target} 2>&1 | head -200`);
+// ── Kali agent base URL (Docker service name resolves internally) ──────────
+const KALI_AGENT_URL  = process.env.KALI_AGENT_URL  || "http://kali:5000";
+const KALI_AGENT_TOKEN = process.env.KALI_AGENT_TOKEN || "secops-kali-agent-token-change-me";
+const ZAP_URL         = process.env.ZAP_URL          || "http://zaproxy:8080";
+const ZAP_API_KEY     = process.env.ZAP_API_KEY      || "secops-zap-key";
+
+const kaliHeaders = () => ({
+  "Content-Type": "application/json",
+  "Authorization": `Bearer ${KALI_AGENT_TOKEN}`,
+});
+
+async function getKaliTools() {
   try {
-    const { stdout } = await runCmd(`${sshBase} "${cmd}"`, { timeout: 300000, ignoreError: true });
-    return { tool:"kali", success:true, output: stdout.slice(0, 8000), command: cmd };
+    const r = await axios.get(`${KALI_AGENT_URL}/api/tools`, { headers: kaliHeaders(), timeout: 10000 });
+    return r.data;
   } catch(e) {
-    return { tool:"kali", success:false, error: e.message };
+    return null;
   }
+}
+
+async function runKaliTool(tool, target, profile, extraFlags) {
+  try {
+    const r = await axios.post(`${KALI_AGENT_URL}/api/scan`, {
+      tool, target, profile: profile || "standard",
+      extra_flags: extraFlags || "", timeout: 540,
+    }, { headers: kaliHeaders(), timeout: 570000 });
+    return r.data;
+  } catch(e) {
+    return { tool, success: false, error: e.message };
+  }
+}
+
+async function runKali(target, profile, selectedTools) {
+  // Run all selected Kali tools and aggregate results
+  const tools = Array.isArray(selectedTools) && selectedTools.length
+    ? selectedTools
+    : ["nmap", "nikto", "sslscan", "whatweb"];
+
+  const results = {};
+  for (const t of tools) {
+    try {
+      const endpoint = `${KALI_AGENT_URL}/api/scan/${t}`;
+      const r = await axios.post(endpoint,
+        { target, profile: profile || "standard" },
+        { headers: kaliHeaders(), timeout: 570000 }
+      ).catch(() => null);
+      results[t] = r?.data || await runKaliTool(t, target, profile);
+    } catch(e) {
+      results[t] = { tool: t, success: false, error: e.message };
+    }
+  }
+  // Flatten into unified output
+  const summary = Object.entries(results).map(([t, r]) =>
+    `=== ${t.toUpperCase()} ===\n${(r.output || r.error || "no output").slice(0, 3000)}`
+  ).join("\n\n");
+  return {
+    tool: "kali",
+    success: Object.values(results).some(r => r.success !== false),
+    tools_run: tools,
+    tool_results: results,
+    output: summary.slice(0, 15000),
+  };
 }
 
 async function analyzeWithClaude(results, target) {
@@ -343,8 +394,36 @@ function buildReportHTML(job) {
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({ ok: true, service: "vuln-assessment", port: PORT });
+    // Also check Kali agent
+    const kaliOk = await axios.get(`${KALI_AGENT_URL}/health`, { timeout: 5000 })
+      .then(r => r.data?.ok).catch(() => false);
+    // Also check ZAProxy
+    const zapOk = await axios.get(`${ZAP_URL}/JSON/core/view/version/?apikey=${ZAP_API_KEY}`, { timeout: 5000 })
+      .then(() => true).catch(() => false);
+    res.json({ ok: true, service: "vuln-assessment", port: PORT,
+               kali_agent: kaliOk, zaproxy: zapOk });
   } catch(e) { res.status(503).json({ ok: false, error: e.message }); }
+});
+
+/* ── Kali tool inventory ──────────────────────────────────────────────────── */
+app.get("/api/vuln/kali/tools", requireAuth, async (req, res) => {
+  try {
+    const r = await axios.get(`${KALI_AGENT_URL}/api/tools`,
+      { headers: kaliHeaders(), timeout: 10000 });
+    res.json({ ok: true, tools: r.data });
+  } catch(e) {
+    res.json({ ok: false, error: "Kali agent unreachable: " + e.message, tools: {} });
+  }
+});
+
+/* ── Kali agent health proxy ─────────────────────────────────────────────── */
+app.get("/api/vuln/kali/health", async (req, res) => {
+  try {
+    const r = await axios.get(`${KALI_AGENT_URL}/health`, { timeout: 8000 });
+    res.json(r.data);
+  } catch(e) {
+    res.status(503).json({ ok: false, error: e.message });
+  }
 });
 
 /* ── Scan Routes ──────────────────────────────────────────────────────────── */
@@ -365,6 +444,7 @@ app.post("/api/vuln/scan", requireAuth, async (req, res) => {
       await updateJob(jobId, { status:"running", started_at: new Date(), progress: 5 });
       const results = {};
       const toolList = Array.isArray(tools) ? tools : [tools];
+      const kaliTools = req.body.kali_tools || null; // optional sub-tool list for Kali agent
       const step = Math.floor(80 / toolList.length);
       let prog = 10;
       for (const t of toolList) {
@@ -373,7 +453,7 @@ app.post("/api/vuln/scan", requireAuth, async (req, res) => {
         if (t === "zaproxy") results.zaproxy = await runZAP(target, scan_type);
         if (t === "nessus")  results.nessus  = await runNessus(target);
         if (t === "qualys")  results.qualys  = await runQualys(target);
-        if (t === "kali")    results.kali    = await runKali(target, scan_type);
+        if (t === "kali")    results.kali    = await runKali(target, scan_type, kaliTools);
         prog += step;
       }
       await updateJob(jobId, { progress: 90 });

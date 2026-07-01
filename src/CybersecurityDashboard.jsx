@@ -2896,11 +2896,22 @@ function GRCPage() {
 
 // ── Automated Vulnerability Assessment ───────────────────────────────────────
 const VULN_TOOLS = [
-  { id:"nmap",    label:"Nmap",    icon:"🗺️", color:"#3b82f6", desc:"Port & service discovery" },
-  { id:"zaproxy", label:"ZAProxy", icon:"🕷️", color:"#f59e0b", desc:"Web application scan (OWASP)" },
-  { id:"nessus",  label:"Nessus",  icon:"🔬", color:"#8b5cf6", desc:"Deep vulnerability scan" },
-  { id:"qualys",  label:"Qualys",  icon:"☁️", color:"#10b981", desc:"Cloud-based VMDR scan" },
-  { id:"kali",    label:"Kali",    icon:"🐉", color:"#dc2626", desc:"Custom Kali Linux scan" },
+  { id:"nmap",    label:"Nmap",          icon:"🗺️", color:"#3b82f6", desc:"Port & service discovery" },
+  { id:"zaproxy", label:"ZAProxy",       icon:"🕷️", color:"#f59e0b", desc:"Web application scan (OWASP)" },
+  { id:"nessus",  label:"Nessus",        icon:"🔬", color:"#8b5cf6", desc:"Deep vulnerability scan" },
+  { id:"qualys",  label:"Qualys",        icon:"☁️", color:"#10b981", desc:"Cloud-based VMDR scan" },
+  { id:"kali",    label:"Kali Linux",    icon:"🐉", color:"#dc2626", desc:"Kali agent — multi-tool scan" },
+];
+
+const KALI_AGENT_TOOLS = [
+  { id:"nmap",     label:"Nmap",     icon:"🗺️", desc:"Port & OS detection" },
+  { id:"nikto",    label:"Nikto",    icon:"🌐", desc:"Web server vulnerabilities" },
+  { id:"gobuster", label:"Gobuster", icon:"📂", desc:"Directory & file enumeration" },
+  { id:"sslscan",  label:"SSLScan",  icon:"🔐", desc:"TLS/SSL certificate analysis" },
+  { id:"sqlmap",   label:"SQLMap",   icon:"💉", desc:"SQL injection detection" },
+  { id:"whatweb",  label:"WhatWeb",  icon:"🔍", desc:"Web fingerprinting" },
+  { id:"masscan",  label:"Masscan",  icon:"⚡", desc:"Fast mass port scanner" },
+  { id:"dnsenum",  label:"DNSenum",  icon:"🌍", desc:"DNS enumeration" },
 ];
 
 const SCAN_PROFILES = [
@@ -2914,6 +2925,14 @@ function SeverityCount({ results }) {
   if (results?.nmap?.ports) results.nmap.ports.filter(p=>p.state==="open").forEach(()=>counts.Info++);
   if (results?.zaproxy?.alerts) results.zaproxy.alerts.forEach(a => { if(counts[a.risk]!==undefined) counts[a.risk]++; });
   if (results?.nessus?.vulns) results.nessus.vulns.forEach(v => { if(counts[v.severity]!==undefined) counts[v.severity]++; });
+  // Count kali sub-tool findings
+  if (results?.kali?.tool_results) {
+    Object.values(results.kali.tool_results).forEach(tr => {
+      if (tr?.findings) tr.findings.forEach(f => { if(counts[f.severity]!==undefined) counts[f.severity]++; else counts.Info++; });
+      if (tr?.vulnerable) counts.High++;
+      if (tr?.issues) tr.issues.forEach(i => { counts[i.severity && counts[i.severity]!==undefined ? i.severity : "Medium"]++; });
+    });
+  }
   return counts;
 }
 
@@ -2926,7 +2945,10 @@ function VulnAssessmentPage() {
   const [launching, setLaunching]     = React.useState(false);
   const [target, setTarget]           = React.useState("");
   const [profile, setProfile]         = React.useState("standard");
-  const [selectedTools, setSelectedTools] = React.useState(["nmap"]);
+  const [selectedTools, setSelectedTools] = React.useState(["nmap", "kali"]);
+  const [kaliTools, setKaliTools]     = React.useState(["nmap","nikto","sslscan","whatweb"]);
+  const [kaliStatus, setKaliStatus]   = React.useState(null); // null | "ok" | "error"
+  const [kaliSubTab, setKaliSubTab]   = React.useState("");
   const [activeTab, setActiveTab]     = React.useState("overview");
   const [pollTimer, setPollTimer]     = React.useState(null);
 
@@ -2952,7 +2974,19 @@ function VulnAssessmentPage() {
     setLoadingDetail(false);
   }
 
-  React.useEffect(() => { fetchScans(); }, []);
+  // Kali agent health check
+  async function checkKaliStatus() {
+    try {
+      const r = await apiFetch(`${VULN_API}/api/vuln/kali/health`);
+      const d = await r.json();
+      setKaliStatus(d.kali?.ok ? "ok" : "error");
+    } catch(e) { setKaliStatus("error"); }
+  }
+
+  React.useEffect(() => {
+    fetchScans();
+    checkKaliStatus();
+  }, []);
 
   React.useEffect(() => {
     if (selectedScan) fetchDetail(selectedScan);
@@ -2977,13 +3011,23 @@ function VulnAssessmentPage() {
   function toggleTool(id) {
     setSelectedTools(prev => prev.includes(id) ? prev.filter(t=>t!==id) : [...prev, id]);
   }
+  function toggleKaliTool(id) {
+    setKaliTools(prev => prev.includes(id) ? prev.filter(t=>t!==id) : [...prev, id]);
+  }
 
   async function launchScan() {
     if (!target.trim()) return alert("Please enter a target IP or domain.");
     if (selectedTools.length === 0) return alert("Select at least one tool.");
+    if (selectedTools.includes("kali") && kaliTools.length === 0) return alert("Select at least one Kali sub-tool.");
     setLaunching(true);
     try {
-      const r = await apiFetch(`${VULN_API}/api/vuln/scan`, { method:"POST", body: JSON.stringify({ target:target.trim(), scan_type:profile, tools:selectedTools }) });
+      const payload = {
+        target: target.trim(),
+        scan_type: profile,
+        tools: selectedTools,
+        kali_tools: selectedTools.includes("kali") ? kaliTools : undefined,
+      };
+      const r = await apiFetch(`${VULN_API}/api/vuln/scan`, { method:"POST", body: JSON.stringify(payload) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Launch failed");
       await fetchScans();
@@ -3001,7 +3045,7 @@ function VulnAssessmentPage() {
   }
 
   function downloadReport(id) {
-    window.open(`${VULN_API}/api/vuln/scan/${id}/pdf?token=${document.cookie.match(/session=([^;]+)/)?.[1]||""}`, "_blank");
+    window.open(`${VULN_API}/api/vuln/scan/${id}/pdf`, "_blank");
   }
 
   const statusColor = { queued:"#6b7280", running:"#3b82f6", completed:"#16a34a", failed:"#dc2626" };
@@ -3011,13 +3055,40 @@ function VulnAssessmentPage() {
   const detail = scanDetail;
   const sevCounts = detail ? SeverityCount({ results: detail.results }) : null;
 
+  // Build result tabs based on what's in scan results
+  const resultTabs = detail && detail.status === "completed" ? [
+    { id:"overview", label:"Overview" },
+    ...(detail.results?.nmap     ? [{ id:"nmap",    label:"🗺️ Nmap" }]       : []),
+    ...(detail.results?.zaproxy  ? [{ id:"zaproxy", label:"🕷️ ZAProxy" }]    : []),
+    ...(detail.results?.nessus   ? [{ id:"nessus",  label:"🔬 Nessus" }]     : []),
+    ...(detail.results?.kali     ? [{ id:"kali",    label:"🐉 Kali Linux" }]  : []),
+    { id:"ai", label:"🤖 AI Analysis" },
+  ] : [];
+
   return (
     <div>
-      <SectionTitle title="Automated Vulnerability Assessment" subtitle="Orchestrated security scanning with Kali, Nmap, ZAProxy, Nessus, Qualys + Claude AI analysis" />
+      <SectionTitle title="Automated Vulnerability Assessment" subtitle="Orchestrated security scanning with Kali Linux, Nmap, ZAProxy, Nessus, Qualys + Claude AI" />
 
       <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:16 }}>
         {/* ── Left: Launch Panel ── */}
         <div>
+          {/* Kali agent status banner */}
+          {kaliStatus && (
+            <div style={{ marginBottom:10, padding:"8px 14px", borderRadius:8, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", gap:8,
+              background: kaliStatus==="ok" ? "#f0fdf4" : "#fef2f2",
+              border: `1px solid ${kaliStatus==="ok" ? "#bbf7d0" : "#fecaca"}`,
+              color: kaliStatus==="ok" ? "#15803d" : "#b91c1c" }}>
+              <span>{kaliStatus==="ok" ? "🟢" : "🔴"}</span>
+              Kali Agent: {kaliStatus==="ok" ? "Online & Ready" : "Offline — check Docker"}
+              <button onClick={checkKaliStatus} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", fontSize:12, color:"inherit" }}>↻</button>
+            </div>
+          )}
+
+          <div style={{ marginBottom:10, padding:"8px 14px", borderRadius:8, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", gap:8,
+            background:"#fffbf0", border:"1px solid #fde68a", color:"#92400e" }}>
+            <span>🕷️</span> ZAProxy: Auto-deployed (ghcr.io/zaproxy/zaproxy:stable)
+          </div>
+
           <Card style={{ padding:20, marginBottom:16 }}>
             <div style={{ fontSize:14, fontWeight:800, color:C.text, marginBottom:16 }}>🚀 New Scan</div>
             <div style={{ marginBottom:12 }}>
@@ -3041,17 +3112,52 @@ function VulnAssessmentPage() {
             <div style={{ marginBottom:16 }}>
               <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:8 }}>Tools</div>
               {VULN_TOOLS.map(t => (
-                <div key={t.id} onClick={()=>toggleTool(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 10px", borderRadius:8, marginBottom:5, cursor:"pointer",
-                  border:`2px solid ${selectedTools.includes(t.id) ? t.color : C.border}`, background: selectedTools.includes(t.id) ? t.color+"10" : "#fff" }}>
-                  <div style={{ width:16, height:16, borderRadius:3, border:`2px solid ${selectedTools.includes(t.id) ? t.color : C.border}`,
-                    background: selectedTools.includes(t.id) ? t.color : "#fff", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                    {selectedTools.includes(t.id) && <span style={{ fontSize:10, color:"#fff" }}>✓</span>}
+                <div key={t.id}>
+                  <div onClick={()=>toggleTool(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 10px", borderRadius:8, marginBottom:5, cursor:"pointer",
+                    border:`2px solid ${selectedTools.includes(t.id) ? t.color : C.border}`, background: selectedTools.includes(t.id) ? t.color+"10" : "#fff" }}>
+                    <div style={{ width:16, height:16, borderRadius:3, border:`2px solid ${selectedTools.includes(t.id) ? t.color : C.border}`,
+                      background: selectedTools.includes(t.id) ? t.color : "#fff", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      {selectedTools.includes(t.id) && <span style={{ fontSize:10, color:"#fff" }}>✓</span>}
+                    </div>
+                    <span style={{ fontSize:14 }}>{t.icon}</span>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color: selectedTools.includes(t.id) ? t.color : C.text }}>{t.label}</div>
+                      <div style={{ fontSize:10, color:C.muted }}>{t.desc}</div>
+                    </div>
+                    {t.id==="kali" && kaliStatus && (
+                      <span style={{ fontSize:10, fontWeight:700, color: kaliStatus==="ok" ? "#16a34a" : "#dc2626" }}>
+                        {kaliStatus==="ok" ? "●" : "○"}
+                      </span>
+                    )}
                   </div>
-                  <span style={{ fontSize:14 }}>{t.icon}</span>
-                  <div>
-                    <div style={{ fontSize:12, fontWeight:700, color: selectedTools.includes(t.id) ? t.color : C.text }}>{t.label}</div>
-                    <div style={{ fontSize:10, color:C.muted }}>{t.desc}</div>
-                  </div>
+
+                  {/* Kali sub-tools — shown when Kali is selected */}
+                  {t.id==="kali" && selectedTools.includes("kali") && (
+                    <div style={{ marginLeft:20, marginBottom:8, padding:"10px 12px", background:"#fef2f2", borderRadius:8, border:"1px solid #fecaca" }}>
+                      <div style={{ fontSize:11, fontWeight:700, color:"#991b1b", marginBottom:8 }}>🐉 Kali Sub-Tools</div>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:4 }}>
+                        {KALI_AGENT_TOOLS.map(kt => (
+                          <div key={kt.id} onClick={()=>toggleKaliTool(kt.id)} style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 8px", borderRadius:6, cursor:"pointer",
+                            border:`1px solid ${kaliTools.includes(kt.id) ? "#dc2626" : "#fca5a5"}`,
+                            background: kaliTools.includes(kt.id) ? "#fee2e2" : "#fff" }}>
+                            <div style={{ width:12, height:12, borderRadius:2, border:`2px solid ${kaliTools.includes(kt.id) ? "#dc2626" : "#fca5a5"}`,
+                              background: kaliTools.includes(kt.id) ? "#dc2626" : "#fff", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                              {kaliTools.includes(kt.id) && <span style={{ fontSize:8, color:"#fff" }}>✓</span>}
+                            </div>
+                            <span style={{ fontSize:12 }}>{kt.icon}</span>
+                            <div>
+                              <div style={{ fontSize:11, fontWeight:700, color:"#7f1d1d" }}>{kt.label}</div>
+                              <div style={{ fontSize:9, color:"#b91c1c" }}>{kt.desc}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ marginTop:8, fontSize:10, color:"#b91c1c" }}>
+                        Selected: {kaliTools.length} tool{kaliTools.length!==1?"s":""}
+                        {kaliTools.length===0 && <span style={{ color:"#dc2626", fontWeight:700 }}> ← select at least one</span>}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -3164,15 +3270,8 @@ function VulnAssessmentPage() {
               {/* Tabs */}
               {detail.status==="completed" && (
                 <>
-                  <div style={{ display:"flex", gap:4, marginBottom:16 }}>
-                    {[
-                      { id:"overview", label:"Overview" },
-                      ...(detail.results?.nmap     ? [{ id:"nmap",    label:"🗺️ Nmap" }]    : []),
-                      ...(detail.results?.zaproxy  ? [{ id:"zaproxy", label:"🕷️ ZAProxy" }]  : []),
-                      ...(detail.results?.nessus   ? [{ id:"nessus",  label:"🔬 Nessus" }]  : []),
-                      ...(detail.results?.kali     ? [{ id:"kali",    label:"🐉 Kali" }]     : []),
-                      { id:"ai", label:"🤖 AI Analysis" },
-                    ].map(t => (
+                  <div style={{ display:"flex", gap:4, marginBottom:16, flexWrap:"wrap" }}>
+                    {resultTabs.map(t => (
                       <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{ padding:"8px 16px", borderRadius:8, border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
                         background: activeTab===t.id ? C.primary : "#f1f5f9", color: activeTab===t.id ? "#fff" : C.muted }}>
                         {t.label}
@@ -3180,7 +3279,7 @@ function VulnAssessmentPage() {
                     ))}
                   </div>
 
-                  {/* Overview tab */}
+                  {/* ── Overview tab ── */}
                   {activeTab==="overview" && (
                     <div style={{ display:"grid", gap:12 }}>
                       {VULN_TOOLS.map(t => {
@@ -3199,22 +3298,39 @@ function VulnAssessmentPage() {
                               </div>
                               <div style={{ textAlign:"right", fontSize:12, color:C.muted }}>
                                 {t.id==="nmap"    && res.ports    && <span><strong style={{color:C.text}}>{res.ports.filter(p=>p.state==="open").length}</strong> open ports</span>}
-                                {t.id==="zaproxy" && res.alerts   && <span><strong style={{color:C.text}}>{res.alertCount}</strong> web alerts</span>}
-                                {t.id==="nessus"  && res.vulns    && <span><strong style={{color:C.text}}>{res.vulnCount}</strong> vulnerabilities</span>}
-                                {t.id==="kali"    && res.output   && <span>Output captured</span>}
+                                {t.id==="zaproxy" && res.alerts   && <span><strong style={{color:C.text}}>{res.alertCount||res.alerts?.length}</strong> web alerts</span>}
+                                {t.id==="nessus"  && res.vulns    && <span><strong style={{color:C.text}}>{res.vulnCount||res.vulns?.length}</strong> vulnerabilities</span>}
+                                {t.id==="kali"    && res.tools_run && <span><strong style={{color:C.text}}>{res.tools_run.length}</strong> tools run</span>}
                                 {!ok && <span style={{color:C.critical}}>{res.error?.slice(0,60)}</span>}
                               </div>
                             </div>
+                            {/* Kali sub-tool summary */}
+                            {t.id==="kali" && ok && res.tool_results && (
+                              <div style={{ marginTop:12, display:"flex", gap:8, flexWrap:"wrap" }}>
+                                {Object.entries(res.tool_results).map(([toolName, tr])=>(
+                                  <div key={toolName} style={{ padding:"4px 10px", borderRadius:6, background: tr?.success===false ? "#fef2f2" : "#f0fdf4",
+                                    border:`1px solid ${tr?.success===false ? "#fecaca" : "#bbf7d0"}`, fontSize:11, fontWeight:600,
+                                    color: tr?.success===false ? "#dc2626" : "#16a34a" }}>
+                                    {toolName} {tr?.success===false ? "✗" : "✓"}
+                                    {tr?.vulnerable && <span style={{ color:"#b91c1c" }}> ⚠ SQLi</span>}
+                                    {tr?.open_ports?.length > 0 && <span> ({tr.open_ports.length} ports)</span>}
+                                    {tr?.findings?.length > 0 && <span> ({tr.findings.length} findings)</span>}
+                                    {tr?.found_paths?.length > 0 && <span> ({tr.found_paths.length} paths)</span>}
+                                    {tr?.issues?.length > 0 && <span> ({tr.issues.length} issues)</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </Card>
                         );
                       })}
                     </div>
                   )}
 
-                  {/* Nmap tab */}
+                  {/* ── Nmap tab ── */}
                   {activeTab==="nmap" && detail.results?.nmap && (
                     <Card style={{ padding:20 }}>
-                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Nmap Scan Results — {detail.target}</div>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Nmap — Port & Service Discovery</div>
                       {detail.results.nmap.os && <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>OS: <strong>{detail.results.nmap.os}</strong></div>}
                       <table style={{ width:"100%", borderCollapse:"collapse" }}>
                         <thead><tr style={{ background:"#f8fafc" }}>
@@ -3237,7 +3353,7 @@ function VulnAssessmentPage() {
                     </Card>
                   )}
 
-                  {/* ZAProxy tab */}
+                  {/* ── ZAProxy tab ── */}
                   {activeTab==="zaproxy" && detail.results?.zaproxy && (
                     <Card style={{ padding:20 }}>
                       <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>OWASP ZAProxy — Web Application Vulnerabilities</div>
@@ -3260,7 +3376,7 @@ function VulnAssessmentPage() {
                     </Card>
                   )}
 
-                  {/* Nessus tab */}
+                  {/* ── Nessus tab ── */}
                   {activeTab==="nessus" && detail.results?.nessus && (
                     <Card style={{ padding:20 }}>
                       <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Nessus Vulnerability Results</div>
@@ -3281,18 +3397,226 @@ function VulnAssessmentPage() {
                     </Card>
                   )}
 
-                  {/* Kali tab */}
-                  {activeTab==="kali" && detail.results?.kali && (
-                    <Card style={{ padding:20 }}>
-                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>Kali Linux Output</div>
-                      {detail.results.kali.command && <div style={{ fontFamily:"monospace", fontSize:11, color:C.muted, marginBottom:12, background:"#1e293b", color:"#94a3b8", padding:"8px 12px", borderRadius:6 }}>$ {detail.results.kali.command}</div>}
-                      <pre style={{ background:"#0f172a", color:"#e2e8f0", padding:16, borderRadius:10, fontSize:12, overflowX:"auto", whiteSpace:"pre-wrap", maxHeight:500, overflowY:"auto" }}>
-                        {detail.results.kali.output || "No output"}
-                      </pre>
-                    </Card>
-                  )}
+                  {/* ── Kali Linux tab — per-tool structured results ── */}
+                  {activeTab==="kali" && detail.results?.kali && (() => {
+                    const k = detail.results.kali;
+                    const toolResults = k.tool_results || {};
+                    const effectiveKaliSubTab = kaliSubTab || Object.keys(toolResults)[0] || "";
 
-                  {/* AI Analysis tab */}
+                    return (
+                      <div>
+                        {/* Sub-tool tab bar */}
+                        <div style={{ display:"flex", gap:4, marginBottom:12, flexWrap:"wrap" }}>
+                          {Object.keys(toolResults).map(tn => (
+                            <button key={tn} onClick={()=>setKaliSubTab(tn)} style={{ padding:"6px 14px", borderRadius:8, border:`2px solid ${effectiveKaliSubTab===tn ? "#dc2626" : C.border}`,
+                              cursor:"pointer", fontSize:12, fontWeight:600,
+                              background: effectiveKaliSubTab===tn ? "#dc2626" : "#fff", color: effectiveKaliSubTab===tn ? "#fff" : C.muted }}>
+                              {KALI_AGENT_TOOLS.find(t=>t.id===tn)?.icon} {tn}
+                              {toolResults[tn]?.success===false && <span style={{ marginLeft:4 }}>✗</span>}
+                            </button>
+                          ))}
+                        </div>
+
+                        {effectiveKaliSubTab && toolResults[effectiveKaliSubTab] && (() => {
+                          const tr = toolResults[effectiveKaliSubTab];
+
+                          if (!tr.success) return (
+                            <Card style={{ padding:20, border:`2px solid ${C.critical}`, background:"#fef2f2" }}>
+                              <div style={{ fontSize:13, fontWeight:700, color:C.critical, marginBottom:8 }}>✗ {effectiveKaliSubTab} failed</div>
+                              <pre style={{ fontSize:12, color:C.critical, whiteSpace:"pre-wrap" }}>{tr.error || "Unknown error"}</pre>
+                            </Card>
+                          );
+
+                          // Nmap sub-tool results
+                          if (effectiveKaliSubTab === "nmap" && tr.open_ports) return (
+                            <Card style={{ padding:20 }}>
+                              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>🗺️ Nmap — Kali Agent Results</div>
+                              {tr.os_guess && <div style={{ fontSize:12, color:C.muted, marginBottom:10 }}>OS: <strong>{tr.os_guess}</strong></div>}
+                              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                                <thead><tr style={{ background:"#f8fafc" }}>
+                                  {["Port","Protocol","State","Service","Version"].map(h=>(
+                                    <th key={h} style={{ padding:"8px 10px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                                  ))}
+                                </tr></thead>
+                                <tbody>{tr.open_ports.map((p,i)=>(
+                                  <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                                    <td style={{ padding:"9px 10px", fontFamily:"monospace", fontWeight:700, color:C.text }}>{p.port}</td>
+                                    <td style={{ padding:"9px 10px", fontSize:12 }}>{p.protocol}</td>
+                                    <td style={{ padding:"9px 10px" }}><span style={{ color:C.critical, fontWeight:700, fontSize:12 }}>open</span></td>
+                                    <td style={{ padding:"9px 10px", fontSize:12 }}>{p.service}</td>
+                                    <td style={{ padding:"9px 10px", fontSize:11, color:C.muted }}>{p.version||"—"}</td>
+                                  </tr>
+                                ))}</tbody>
+                              </table>
+                            </Card>
+                          );
+
+                          // Nikto results
+                          if (effectiveKaliSubTab === "nikto" && tr.findings) return (
+                            <Card style={{ padding:20 }}>
+                              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>🌐 Nikto — Web Server Vulnerabilities</div>
+                              {tr.server && <div style={{ fontSize:12, color:C.muted, marginBottom:10 }}>Server: <strong>{tr.server}</strong></div>}
+                              {tr.findings.length === 0 ? (
+                                <div style={{ textAlign:"center", padding:32, color:C.ok }}>✅ No issues found</div>
+                              ) : (
+                                <div style={{ display:"grid", gap:8 }}>
+                                  {tr.findings.map((f,i) => (
+                                    <div key={i} style={{ padding:"10px 14px", borderRadius:8, background:"#fef9c3", border:"1px solid #fde047" }}>
+                                      <div style={{ fontSize:12, fontWeight:700, color:"#854d0e", marginBottom:4 }}>{f.msg || f.description}</div>
+                                      {f.url && <div style={{ fontFamily:"monospace", fontSize:11, color:C.muted }}>{f.url}</div>}
+                                      {f.method && <span style={{ fontSize:10, background:"#f1f5f9", padding:"2px 6px", borderRadius:4, color:C.muted }}>{f.method}</span>}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </Card>
+                          );
+
+                          // Gobuster results
+                          if (effectiveKaliSubTab === "gobuster" && tr.found_paths) return (
+                            <Card style={{ padding:20 }}>
+                              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>📂 Gobuster — Directory Enumeration</div>
+                              <div style={{ fontSize:12, color:C.muted, marginBottom:10 }}>{tr.found_paths.length} path{tr.found_paths.length!==1?"s":""} found</div>
+                              {tr.found_paths.length === 0 ? (
+                                <div style={{ textAlign:"center", padding:32, color:C.muted }}>No directories discovered</div>
+                              ) : (
+                                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                                  <thead><tr style={{ background:"#f8fafc" }}>
+                                    {["Path","Status","Size"].map(h=>(
+                                      <th key={h} style={{ padding:"8px 10px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                                    ))}
+                                  </tr></thead>
+                                  <tbody>{tr.found_paths.map((p,i)=>(
+                                    <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                                      <td style={{ padding:"9px 10px", fontFamily:"monospace", fontSize:12, color:C.primary }}>{p.path}</td>
+                                      <td style={{ padding:"9px 10px", fontSize:12, fontWeight:700, color: p.status < 300 ? C.ok : p.status < 400 ? C.warn : C.critical }}>{p.status}</td>
+                                      <td style={{ padding:"9px 10px", fontSize:11, color:C.muted }}>{p.size ? `${p.size} B` : "—"}</td>
+                                    </tr>
+                                  ))}</tbody>
+                                </table>
+                              )}
+                            </Card>
+                          );
+
+                          // SSLScan results
+                          if (effectiveKaliSubTab === "sslscan" && tr.issues !== undefined) return (
+                            <Card style={{ padding:20 }}>
+                              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>🔐 SSLScan — TLS/SSL Analysis</div>
+                              {tr.certificate && (
+                                <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:8, padding:12, marginBottom:12 }}>
+                                  <div style={{ fontSize:12, fontWeight:700, color:"#15803d", marginBottom:6 }}>Certificate Info</div>
+                                  {tr.certificate.subject && <div style={{ fontSize:11, color:C.muted }}>Subject: {tr.certificate.subject}</div>}
+                                  {tr.certificate.issuer  && <div style={{ fontSize:11, color:C.muted }}>Issuer: {tr.certificate.issuer}</div>}
+                                  {tr.certificate.expiry  && <div style={{ fontSize:11, color:C.muted }}>Expiry: {tr.certificate.expiry}</div>}
+                                </div>
+                              )}
+                              {tr.supported_protocols && (
+                                <div style={{ marginBottom:12 }}>
+                                  <div style={{ fontSize:12, fontWeight:700, color:C.text, marginBottom:6 }}>Supported Protocols</div>
+                                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                                    {tr.supported_protocols.map((proto,i) => (
+                                      <span key={i} style={{ padding:"3px 10px", borderRadius:6, fontSize:12, fontWeight:600,
+                                        background: proto.includes("TLSv1.2")||proto.includes("TLSv1.3") ? "#f0fdf4" : "#fef2f2",
+                                        color: proto.includes("TLSv1.2")||proto.includes("TLSv1.3") ? "#15803d" : "#dc2626",
+                                        border: `1px solid ${proto.includes("TLSv1.2")||proto.includes("TLSv1.3") ? "#bbf7d0" : "#fecaca"}` }}>
+                                        {proto}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {tr.issues && tr.issues.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize:12, fontWeight:700, color:C.critical, marginBottom:8 }}>⚠ Issues Found ({tr.issues.length})</div>
+                                  {tr.issues.map((iss,i) => (
+                                    <div key={i} style={{ padding:"8px 12px", borderRadius:6, background:"#fef2f2", border:"1px solid #fecaca", marginBottom:6, fontSize:12, color:"#b91c1c" }}>
+                                      {iss.description || iss}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {tr.issues && tr.issues.length === 0 && <div style={{ textAlign:"center", padding:24, color:C.ok }}>✅ SSL configuration looks good</div>}
+                            </Card>
+                          );
+
+                          // SQLMap results
+                          if (effectiveKaliSubTab === "sqlmap") return (
+                            <Card style={{ padding:20 }}>
+                              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>💉 SQLMap — SQL Injection Detection</div>
+                              <div style={{ padding:16, borderRadius:10, marginBottom:12,
+                                background: tr.vulnerable ? "#fef2f2" : "#f0fdf4",
+                                border: `2px solid ${tr.vulnerable ? "#dc2626" : "#16a34a"}` }}>
+                                <div style={{ fontSize:16, fontWeight:800, color: tr.vulnerable ? C.critical : C.ok }}>
+                                  {tr.vulnerable ? "⚠ SQL Injection Vulnerability Detected!" : "✅ No SQL Injection Found"}
+                                </div>
+                                {tr.injectable_params && tr.injectable_params.length > 0 && (
+                                  <div style={{ marginTop:8 }}>
+                                    <div style={{ fontSize:12, color:C.muted, marginBottom:4 }}>Injectable Parameters:</div>
+                                    {tr.injectable_params.map((p,i) => (
+                                      <span key={i} style={{ display:"inline-block", padding:"2px 8px", borderRadius:4, background:"#fee2e2", color:"#b91c1c", fontFamily:"monospace", fontSize:12, marginRight:6 }}>{p}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              {tr.output && (
+                                <pre style={{ background:"#0f172a", color:"#e2e8f0", padding:14, borderRadius:8, fontSize:11, overflowX:"auto", whiteSpace:"pre-wrap", maxHeight:300, overflowY:"auto" }}>
+                                  {tr.output.slice(0,3000)}{tr.output.length > 3000 && "\n…[truncated]"}
+                                </pre>
+                              )}
+                            </Card>
+                          );
+
+                          // Generic / WhatWeb / Masscan / DNSenum — raw output
+                          return (
+                            <Card style={{ padding:20 }}>
+                              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>
+                                {KALI_AGENT_TOOLS.find(t=>t.id===effectiveKaliSubTab)?.icon} {effectiveKaliSubTab} — Raw Output
+                              </div>
+                              {tr.tech && (
+                                <div style={{ marginBottom:12 }}>
+                                  <div style={{ fontSize:12, fontWeight:700, color:C.text, marginBottom:6 }}>Detected Technologies</div>
+                                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                                    {Object.entries(tr.tech).map(([k,v],i) => (
+                                      <span key={i} style={{ padding:"3px 10px", borderRadius:6, background:"#eff6ff", color:C.primary, border:`1px solid #bfdbfe`, fontSize:12 }}>
+                                        {k}: {v}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {tr.open_ports && tr.open_ports.length > 0 && (
+                                <div style={{ marginBottom:12 }}>
+                                  <div style={{ fontSize:12, fontWeight:700, color:C.text, marginBottom:6 }}>Open Ports ({tr.open_ports.length})</div>
+                                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                                    {tr.open_ports.map((p,i) => (
+                                      <span key={i} style={{ padding:"3px 10px", borderRadius:6, background:"#fef2f2", color:C.critical, border:`1px solid #fecaca`, fontFamily:"monospace", fontSize:12 }}>
+                                        {p.port}/{p.protocol}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {tr.hostnames && tr.hostnames.length > 0 && (
+                                <div style={{ marginBottom:12 }}>
+                                  <div style={{ fontSize:12, fontWeight:700, color:C.text, marginBottom:6 }}>Discovered Hostnames</div>
+                                  {tr.hostnames.map((h,i) => (
+                                    <div key={i} style={{ fontFamily:"monospace", fontSize:12, color:C.muted, padding:"3px 0" }}>{h}</div>
+                                  ))}
+                                </div>
+                              )}
+                              {tr.output && (
+                                <pre style={{ background:"#0f172a", color:"#e2e8f0", padding:14, borderRadius:8, fontSize:11, overflowX:"auto", whiteSpace:"pre-wrap", maxHeight:400, overflowY:"auto" }}>
+                                  {tr.output.slice(0,4000)}{tr.output.length > 4000 && "\n…[truncated]"}
+                                </pre>
+                              )}
+                            </Card>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })()}
+
+                  {/* ── AI Analysis tab ── */}
                   {activeTab==="ai" && (
                     <Card style={{ padding:24 }}>
                       <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
@@ -3331,7 +3655,6 @@ function VulnAssessmentPage() {
     </div>
   );
 }
-
 
 // ── Assets & Patches ─────────────────────────────────────────────────────────
 function AssetsPage({ data }) {
