@@ -42,7 +42,7 @@ const pool = new Pool({
 
 const http = axios.create({
   httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-  timeout: 15000,
+  timeout: 30000,
 });
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
@@ -1003,8 +1003,25 @@ app.post("/api/collect/:tool", requireAuth, async (req, res) => {
   };
   const fn = collectors[tool];
   if (!fn) return res.status(404).json({ error: "Unknown tool" });
-  res.json({ ok: true, message: `Collection started for ${tool}` });
-  fn().catch(e => console.error(`Manual collect ${tool}:`, e.message));
+  try {
+    console.log(`[collect] Starting ${tool}...`);
+    const result = await fn(); // synchronous — wait for actual collection
+    if (result) {
+      console.log(`[collect] ${tool} succeeded`);
+      res.json({ ok: true, message: `${tool} data collected successfully` });
+    } else {
+      // fn returned null = credentials missing or disabled
+      const row = await pool.query(
+        "SELECT last_error FROM integrations WHERE tool_name=$1", [tool]
+      ).catch(() => ({ rows: [] }));
+      const errMsg = row.rows[0]?.last_error || `No credentials found for ${tool} — configure in ⚙️ Settings`;
+      console.warn(`[collect] ${tool} returned null:`, errMsg);
+      res.json({ ok: false, error: errMsg });
+    }
+  } catch(e) {
+    console.error(`[collect] ${tool} threw:`, e.message);
+    res.json({ ok: false, error: e.message });
+  }
 });
 
 // Manual collection trigger

@@ -2015,13 +2015,21 @@ function VulnerabilitiesPage({ data }) {
   const [collecting, setCollecting] = React.useState(false);
   const [collectMsg, setCollectMsg] = React.useState("");
   const collectNow = async () => {
-    setCollecting(true); setCollectMsg("");
+    setCollecting(true); setCollectMsg("🔄 Connecting to Qualys (this takes 30–60s)…");
     try {
-      await apiFetch(`${API}/api/collect/qualys`, { method:"POST" });
-      setCollectMsg("✓ Collection started — reload in 30s");
-      setTimeout(() => window.location.reload(), 30000);
-    } catch(e) { setCollectMsg("✗ " + (e.message||"Failed")); }
-    finally { setCollecting(false); }
+      const res = await apiFetch(`${API}/api/collect/qualys`, { method:"POST" });
+      const j   = await res.json().catch(() => ({}));
+      if (j.ok) {
+        setCollectMsg("✅ Data collected! Reloading…");
+        setTimeout(() => window.location.reload(), 1200);
+      } else {
+        setCollectMsg("❌ " + (j.error || "Collection failed — check Settings"));
+        setCollecting(false);
+      }
+    } catch(e) {
+      setCollectMsg("❌ " + (e.message || "Network error — is the server running?"));
+      setCollecting(false);
+    }
   };
   if (!d._hasData || !d.vulnerabilities?.length) return (
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:60, textAlign:"center" }}>
@@ -2033,7 +2041,7 @@ function VulnerabilitiesPage({ data }) {
       <button onClick={collectNow} disabled={collecting} style={{ padding:"11px 24px", borderRadius:10, border:"none", background:collecting?"#94a3b8":C.primary, color:"white", fontSize:14, fontWeight:700, cursor:collecting?"not-allowed":"pointer" }}>
         {collecting ? "⟳ Collecting…" : "🔄 Collect Qualys Data Now"}
       </button>
-      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color:collectMsg.startsWith("✓")?C.ok:C.critical }}>{collectMsg}</div>}
+      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color:collectMsg.startsWith("✅")||collectMsg.startsWith("✓")?C.ok:collectMsg.startsWith("🔄")?C.warn:C.critical }}>{collectMsg}</div>}
       <div style={{ marginTop:12, fontSize:12, color:C.muted }}>Qualys collection can take 30–60s</div>
     </div>
   );
@@ -2146,14 +2154,21 @@ function FirewallPage({ data }) {
   const [collectMsg, setCollectMsg] = React.useState("");
 
   const collectNow = async (tool="fortinet") => {
-    setCollecting(true); setCollectMsg("");
+    setCollecting(true); setCollectMsg(`🔄 Connecting to ${tool}…`);
     try {
-      await apiFetch(`${API}/api/collect/${tool}`, { method:"POST" });
-      setCollectMsg("✓ Collection started — page will reload in 20s");
-      setTimeout(() => window.location.reload(), 20000);
+      const res = await apiFetch(`${API}/api/collect/${tool}`, { method:"POST" });
+      const j   = await res.json().catch(() => ({}));
+      if (j.ok) {
+        setCollectMsg("✅ Data collected! Reloading…");
+        setTimeout(() => window.location.reload(), 1200);
+      } else {
+        setCollectMsg("❌ " + (j.error || "Collection failed — check ⚙️ Settings"));
+        setCollecting(false);
+      }
     } catch(e) {
-      setCollectMsg("✗ " + (e.message||"Collection failed — check Settings"));
-    } finally { setCollecting(false); }
+      setCollectMsg("❌ " + (e.message || "Network error — is the backend running?"));
+      setCollecting(false);
+    }
   };
 
   // No snapshot at all — show actionable empty state instead of plain NoData
@@ -2181,7 +2196,7 @@ function FirewallPage({ data }) {
           🔵 Collect Palo Alto Data
         </button>
       </div>
-      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color: collectMsg.startsWith("✓")?C.ok:C.critical }}>{collectMsg}</div>}
+      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color: collectMsg.startsWith("✅")||collectMsg.startsWith("✓")?C.ok:collectMsg.startsWith("🔄")?C.warn:C.critical }}>{collectMsg}</div>}
       <div style={{ marginTop:24, fontSize:12, color:C.muted }}>Data auto-collects every 5 min once credentials are saved in ⚙️ Settings.</div>
     </div>
   );
@@ -2250,7 +2265,7 @@ function FirewallPage({ data }) {
             <div style={{ fontSize:16, fontWeight:700, color:C.text }}>{fw.hostname||fw.instance}</div>
             <div style={{ fontSize:12, color:C.muted }}>{fw.vendor==="fortinet"?"Fortinet FortiGate":"Palo Alto Networks"} {fw.version&&`• v${fw.version}`} {fw.host&&`• ${fw.host}`}</div>
             {fw.collectedAt && <div style={{ fontSize:11, color:C.muted }}>Last collected: {new Date(fw.collectedAt).toLocaleString()}</div>}
-            {collectMsg && <div style={{ fontSize:11, marginTop:4, color: collectMsg.startsWith("✓")?C.ok:C.critical, fontWeight:600 }}>{collectMsg}</div>}
+            {collectMsg && <div style={{ fontSize:11, marginTop:4, color: collectMsg.startsWith("✅")||collectMsg.startsWith("✓")?C.ok:collectMsg.startsWith("🔄")?C.warn:C.critical, fontWeight:600 }}>{collectMsg}</div>}
           </div>
           <button onClick={collectNow} disabled={collecting} style={{
             padding:"8px 16px", borderRadius:8, border:`1px solid ${C.primary}`,
@@ -2759,13 +2774,21 @@ function AttackSurfacePage({ data }) {
   const [collecting, setCollecting] = React.useState(false);
   const [collectMsg, setCollectMsg] = React.useState("");
   const collectNow = async () => {
-    setCollecting(true); setCollectMsg("");
+    setCollecting(true); setCollectMsg("🔄 Connecting to UpGuard…");
     try {
-      await apiFetch(`${API}/api/collect/upguard`, { method:"POST" });
-      setCollectMsg("✓ Collection started — reload in 20s");
-      setTimeout(() => window.location.reload(), 20000);
-    } catch(e) { setCollectMsg("✗ " + (e.message||"Failed")); }
-    finally { setCollecting(false); }
+      const res = await apiFetch(`${API}/api/collect/upguard`, { method:"POST" });
+      const j   = await res.json().catch(() => ({}));
+      if (j.ok) {
+        setCollectMsg("✅ Data collected! Reloading…");
+        setTimeout(() => window.location.reload(), 1200);
+      } else {
+        setCollectMsg("❌ " + (j.error || "Collection failed — check ⚙️ Settings"));
+        setCollecting(false);
+      }
+    } catch(e) {
+      setCollectMsg("❌ " + (e.message || "Network error — is the backend running?"));
+      setCollecting(false);
+    }
   };
   if (!d._hasData || !d.surface) return (
     <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:60, textAlign:"center" }}>
@@ -2775,7 +2798,7 @@ function AttackSurfacePage({ data }) {
       <button onClick={collectNow} disabled={collecting} style={{ padding:"11px 24px", borderRadius:10, border:"none", background:collecting?"#94a3b8":C.primary, color:"white", fontSize:14, fontWeight:700, cursor:collecting?"not-allowed":"pointer" }}>
         {collecting ? "⟳ Collecting…" : "🔄 Collect UpGuard Data Now"}
       </button>
-      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color:collectMsg.startsWith("✓")?C.ok:C.critical }}>{collectMsg}</div>}
+      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color:collectMsg.startsWith("✅")||collectMsg.startsWith("✓")?C.ok:collectMsg.startsWith("🔄")?C.warn:C.critical }}>{collectMsg}</div>}
     </div>
   );
   const s = d.surface;
