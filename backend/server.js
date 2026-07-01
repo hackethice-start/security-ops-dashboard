@@ -144,23 +144,46 @@ async function saveSnapshot(tool, payload) {
 async function collectFortinetInstance(inst) {
   const base = (inst.host||"").replace(/\/$/, "");
   if (!base) throw new Error("No host configured");
-  // FortiGate API key goes in Authorization header as "Bearer <key>"
-  // For username/password auth, FortiGate also accepts login session
   const headers = inst.apikey
     ? { Authorization: `Bearer ${inst.apikey}` }
-    : { Authorization: `Bearer ${inst.password}` };   // some versions use password field
-  // Correct FortiOS REST API v2 endpoints:
-  //   /api/v2/cmdb/firewall/policy  — firewall policy list (CMDB config)
-  //   /api/v2/monitor/firewall/policy — live stats per policy
-  const [cmdbPolicies, monPolicies] = await Promise.all([
+    : { Authorization: `Bearer ${inst.password}` };
+
+  const [cmdbPolicies, monPolicies, interfaces, sysInfo, addrGroups] = await Promise.all([
+    // CMDB: full policy config (name, action, srcaddr, dstaddr, service, logtraffic, status)
     http.get(`${base}/api/v2/cmdb/firewall/policy`, { headers })
       .catch(() => ({ data: {} })),
+    // Monitor: per-policy live hit/byte/packet counters
     http.get(`${base}/api/v2/monitor/firewall/policy`, { headers, params: { policyid: 0 } })
       .catch(() => ({ data: {} })),
+    // Monitor: interface bandwidth (in_bps, out_bps, rx_bytes, tx_bytes)
+    http.get(`${base}/api/v2/monitor/system/interface`, { headers })
+      .catch(() => ({ data: {} })),
+    // CMDB: system global settings (hostname, version, management access)
+    http.get(`${base}/api/v2/cmdb/system/global`, { headers })
+      .catch(() => ({ data: {} })),
+    // CMDB: firewall address groups (for CIS check on any/all rules)
+    http.get(`${base}/api/v2/cmdb/firewall/addrgrp`, { headers })
+      .catch(() => ({ data: {} })),
   ]);
-  const policies = cmdbPolicies.data?.results || cmdbPolicies.data?.result || [];
-  const stats    = monPolicies.data?.results  || monPolicies.data?.result  || [];
-  return { source:"fortinet", instance: inst.name||base, policies, stats };
+
+  const policies   = cmdbPolicies.data?.results || cmdbPolicies.data?.result || [];
+  const stats      = monPolicies.data?.results  || monPolicies.data?.result  || [];
+  const ifaces     = interfaces.data?.results   || interfaces.data?.result   || [];
+  const sysGlobal  = sysInfo.data?.results?.[0] || sysInfo.data?.result?.[0] || {};
+  const addrgrps   = addrGroups.data?.results   || addrGroups.data?.result   || [];
+
+  return {
+    source: "fortinet",
+    vendor: "fortinet",
+    instance: inst.name || base,
+    host: base,
+    policies,
+    stats,
+    interfaces: ifaces,
+    sysGlobal,
+    addrgrps,
+    collectedAt: new Date().toISOString(),
+  };
 }
 
 async function collectFortinet() {
@@ -195,29 +218,51 @@ async function collectPaloAlto() {
     // PAN-OS REST API requires location + vsys params
     // Try REST API first, fall back to XML API which is more universally supported
     let rules = [];
+    let interfaces = [];
+    let sysInfo = {};
     try {
-      const rest = await http.get(`${base}/restapi/v10.1/Policies/SecurityRules`, {
-        headers,
-        params: { location: "vsys", vsys: "vsys1" },
-      });
-      rules = rest.data?.result?.entry || [];
-    } catch {
-      // Fall back to PAN-OS XML API (works on all versions)
-      const xml = await http.get(`${base}/api/`, {
-        headers,
-        params: {
-          type: "config",
-          action: "get",
-          xpath: "/config/devices/entry/vsys/entry[@name='vsys1']/rulebase/security/rules",
-          key: c.apikey,
-        },
-      });
-      // Parse entry list from XML response — axios returns string for XML
-      const body = typeof xml.data === "string" ? xml.data : JSON.stringify(xml.data);
-      const names = [...body.matchAll(/entry name="([^"]+)"/g)].map(m => ({ "@name": m[1] }));
-      rules = names;
+      const [rulesRes, intfRes] = await Promise.all([
+        http.get(`${base}/restapi/v10.1/Policies/SecurityRules`, {
+          headers, params: { location: "vsys", vsys: "vsys1" },
+        }).catch(() => null),
+        http.get(`${base}/restapi/v10.1/Network/EthernetInterfaces`, {
+          headers, params: { location: "vsys", vsys: "vsys1" },
+        }).catch(() => null),
+      ]);
+      rules = rulesRes?.data?.result?.entry || [];
+      interfaces = intfRes?.data?.result?.entry || [];
+    } catch {}
+    if (rules.length === 0) {
+      // Fall back to PAN-OS XML API
+      try {
+        const xml = await http.get(`${base}/api/`, {
+          headers,
+          params: {
+            type: "config", action: "get",
+            xpath: "/config/devices/entry/vsys/entry[@name='vsys1']/rulebase/security/rules",
+            key: c.apikey,
+          },
+        });
+        const body = typeof xml.data === "string" ? xml.data : JSON.stringify(xml.data);
+        // Extract full rule entries with action
+        const entries = [...body.matchAll(/entry name="([^"]+)"[^]*?<action>([^<]+)<\/action>/g)]
+          .map(m => ({ "@name": m[1], action: m[2].trim() }));
+        rules = entries.length ? entries
+          : [...body.matchAll(/entry name="([^"]+)"/g)].map(m => ({ "@name": m[1] }));
+      } catch {}
     }
-    const snap = { source:"paloalto", rules };
+    // Try XML API for operational data (interface counters)
+    try {
+      const opXml = await http.get(`${base}/api/`, {
+        headers,
+        params: { type: "op", cmd: "<show><system><info></info></system></show>", key: c.apikey },
+      });
+      const body = typeof opXml.data === "string" ? opXml.data : "";
+      const ver  = (body.match(/<sw-version>([^<]+)<\/sw-version>/) || [])[1] || "";
+      const host = (body.match(/<hostname>([^<]+)<\/hostname>/) || [])[1] || "";
+      sysInfo = { version: ver, hostname: host };
+    } catch {}
+    const snap = { source:"paloalto", vendor:"paloalto", rules, interfaces, sysInfo };
     await saveSnapshot("paloalto", snap);
     await setStatus("paloalto", "connected");
     return snap;

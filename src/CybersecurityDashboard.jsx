@@ -81,55 +81,160 @@ function transformSnapshot(snap) {
   })) : [];
 
   // ── Firewall ────────────────────────────────────────────────────────────
-  // Fortinet CMDB policies: { policyid, name, action:"accept"|"deny", ... }
-  // Fortinet monitor stats: { policyid, bytes, packets, software_packets, ... }
-  // Palo Alto rules:        { "@name": "...", action:"allow"|"deny", ... }
-  const ftPolicies = Array.isArray(ft.policies) ? ft.policies : [];
-  const ftStats    = Array.isArray(ft.stats)    ? ft.stats    : [];
-  const paRules    = Array.isArray(pa.rules)    ? pa.rules    : [];
+  // Build per-instance firewall objects for the instance-selector UI
+  function buildFortinetInstance(snap) {
+    const policies = Array.isArray(snap.policies) ? snap.policies : [];
+    const stats    = Array.isArray(snap.stats)    ? snap.stats    : [];
+    const ifaces   = Array.isArray(snap.interfaces) ? snap.interfaces : [];
+    const sys      = snap.sysGlobal || {};
 
-  // Join CMDB config with monitor hit counts
-  const statsById = {};
-  ftStats.forEach(s => { if (s.policyid != null) statsById[s.policyid] = s; });
+    const statsById = {};
+    stats.forEach(s => { if (s.policyid != null) statsById[s.policyid] = s; });
 
-  const ftMapped = ftPolicies.map(p => {
-    const st  = statsById[p.policyid] || {};
-    const hits = st.packets || st.bytes || 0;
-    const action = (p.action||"").toLowerCase() === "accept" ? "Allow"
-                 : (p.action||"").toLowerCase() === "deny"   ? "Deny"
-                 : p.action || "Allow";
-    return { name: p.name || `Policy ${p.policyid}`, hits, action, policyid: p.policyid };
-  });
+    const mappedPolicies = policies.map(p => {
+      const st = statsById[p.policyid] || {};
+      const srcAny = (p.srcaddr||[]).some(a => a.name==="all"||a.q_origin_key==="all");
+      const dstAny = (p.dstaddr||[]).some(a => a.name==="all"||a.q_origin_key==="all");
+      const svcAny = (p.service||[]).some(s => s.name==="ALL"||s.q_origin_key==="ALL");
+      return {
+        id:       p.policyid,
+        name:     p.name || `Policy ${p.policyid}`,
+        action:   (p.action||"").toLowerCase()==="accept" ? "Allow"
+                : (p.action||"").toLowerCase()==="deny"   ? "Deny" : p.action||"Allow",
+        srcaddr:  (p.srcaddr||[]).map(a=>a.name).join(", ")||"any",
+        dstaddr:  (p.dstaddr||[]).map(a=>a.name).join(", ")||"any",
+        service:  (p.service||[]).map(s=>s.name).join(", ")||"ALL",
+        logtraffic: p.logtraffic || "disable",
+        status:   p.status === "enable" ? "Enabled" : "Disabled",
+        bytes:    st.bytes || 0,
+        packets:  st.packets || 0,
+        sessions: st.asic_sessions || st.software_sessions || 0,
+        srcAny, dstAny, svcAny,
+        overpermissive: srcAny && dstAny,
+      };
+    });
 
-  const paMapped = paRules.map(r => ({
-    name:   r["@name"] || r.name || "Rule",
-    hits:   r.bytes || r.packets || 0,
-    action: (r.action||"allow").toLowerCase() === "deny" ? "Deny" : "Allow",
-  }));
+    const bandwidth = ifaces.filter(i=>i.rx_bytes||i.tx_bytes).map(i=>({
+      name:    i.name,
+      rxBytes: i.rx_bytes || 0,
+      txBytes: i.tx_bytes || 0,
+      rxBps:   i.rx_bps   || i.rxbps || 0,
+      txBps:   i.tx_bps   || i.txbps || 0,
+      link:    i.link ? "Up" : "Down",
+      speed:   i.speed || "",
+    }));
 
-  const allPolicies = [...ftMapped, ...paMapped]
-    .sort((a,b) => b.hits - a.hits)
-    .slice(0, 10);
+    // CIS Benchmark checks derived from config
+    const cisBenchmark = [
+      { id:"CIS-1.1", category:"Access Control",    check:"Management access restricted (no 'any' src on admin policies)", pass: mappedPolicies.filter(p=>p.name?.toLowerCase().includes("admin")||p.name?.toLowerCase().includes("mgmt")).every(p=>!p.srcAny) },
+      { id:"CIS-1.2", category:"Access Control",    check:"Default deny policy exists",            pass: mappedPolicies.some(p=>p.action==="Deny"&&p.srcAny&&p.dstAny) },
+      { id:"CIS-2.1", category:"Logging",            check:"Logging enabled on all allow policies", pass: mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.logtraffic&&p.logtraffic!=="disable") },
+      { id:"CIS-2.2", category:"Logging",            check:"No disabled policies present",          pass: mappedPolicies.every(p=>p.status==="Enabled") },
+      { id:"CIS-3.1", category:"Rule Hygiene",       check:"No unused rules (zero hits)",           pass: mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled").every(p=>p.packets>0) },
+      { id:"CIS-3.2", category:"Rule Hygiene",       check:"No overly permissive any-any rules",    pass: !mappedPolicies.some(p=>p.overpermissive&&p.action==="Allow") },
+      { id:"CIS-3.3", category:"Rule Hygiene",       check:"Services restricted (no ALL on allow policies)", pass: mappedPolicies.filter(p=>p.action==="Allow").every(p=>!p.svcAny) },
+      { id:"CIS-4.1", category:"System Hardening",  check:"Admin HTTPS-only access (no HTTP mgmt)", pass: sys.admin_https_redirect!=="disable" },
+      { id:"CIS-4.2", category:"System Hardening",  check:"SSH management port non-default or disabled", pass: sys.admin_ssh_port ? sys.admin_ssh_port!==22 : null },
+      { id:"CIS-5.1", category:"Network Security",  check:"Split DNS configured",                  pass: null },  // requires DNS config check
+    ];
 
-  // Derive block/allow totals from policy stats
-  const blockedToday = ftMapped.filter(p=>p.action==="Deny").reduce((s,p)=>s+p.hits,0)
-    + paMapped.filter(p=>p.action==="Deny").reduce((s,p)=>s+p.hits,0);
-  const allowedToday = ftMapped.filter(p=>p.action==="Allow").reduce((s,p)=>s+p.hits,0)
-    + paMapped.filter(p=>p.action==="Allow").reduce((s,p)=>s+p.hits,0);
+    return {
+      vendor:      "fortinet",
+      instance:    snap.instance,
+      host:        snap.host,
+      hostname:    sys.hostname || snap.instance,
+      version:     sys.gui_firmware_upgrade_ui ? "" : (sys.firmware_version||""),
+      policyCount: mappedPolicies.length,
+      enabledCount:mappedPolicies.filter(p=>p.status==="Enabled").length,
+      allowCount:  mappedPolicies.filter(p=>p.action==="Allow").length,
+      denyCount:   mappedPolicies.filter(p=>p.action==="Deny").length,
+      unusedRules: mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled"&&p.packets===0).length,
+      overpermissive: mappedPolicies.filter(p=>p.overpermissive&&p.action==="Allow").length,
+      noLogging:   mappedPolicies.filter(p=>p.action==="Allow"&&p.status==="Enabled"&&(!p.logtraffic||p.logtraffic==="disable")).length,
+      policies:    mappedPolicies,
+      bandwidth,
+      cisBenchmark,
+      collectedAt: snap.collectedAt,
+    };
+  }
 
+  function buildPaloAltoInstance(snap) {
+    const rules  = Array.isArray(snap.rules)      ? snap.rules      : [];
+    const ifaces = Array.isArray(snap.interfaces)  ? snap.interfaces : [];
+    const sys    = snap.sysInfo || {};
+
+    const mappedRules = rules.map((r,i) => {
+      const name   = r["@name"] || r.name || `Rule ${i+1}`;
+      const action = (r.action||"allow").toLowerCase()==="deny" ? "Deny" : "Allow";
+      const src    = Array.isArray(r["source"]?.member) ? r["source"].member
+                   : Array.isArray(r.from?.member) ? r.from.member : ["any"];
+      const dst    = Array.isArray(r["destination"]?.member) ? r["destination"].member
+                   : Array.isArray(r.to?.member) ? r.to.member : ["any"];
+      const svc    = Array.isArray(r["service"]?.member) ? r["service"].member : ["any"];
+      const srcAny = src.includes("any");
+      const dstAny = dst.includes("any");
+      const svcAny = svc.includes("any")||svc.includes("application-default");
+      return {
+        id: i+1, name, action,
+        srcaddr: src.join(", "),
+        dstaddr: dst.join(", "),
+        service: svc.join(", "),
+        status: r.disabled==="yes" ? "Disabled" : "Enabled",
+        logtraffic: r["log-end"]==="yes"||r["log-start"]==="yes" ? "enable" : "disable",
+        bytes: 0, packets: 0, sessions: 0,
+        srcAny, dstAny, svcAny,
+        overpermissive: srcAny && dstAny,
+      };
+    });
+
+    const cisBenchmark = [
+      { id:"CIS-1.1", category:"Access Control",   check:"Management access restricted", pass: mappedRules.filter(r=>r.name?.toLowerCase().includes("mgmt")||r.name?.toLowerCase().includes("admin")).every(r=>!r.srcAny) },
+      { id:"CIS-1.2", category:"Access Control",   check:"Default deny policy exists",   pass: mappedRules.some(r=>r.action==="Deny"&&r.srcAny&&r.dstAny) },
+      { id:"CIS-2.1", category:"Logging",           check:"Logging enabled on allow rules", pass: mappedRules.filter(r=>r.action==="Allow"&&r.status==="Enabled").every(r=>r.logtraffic==="enable") },
+      { id:"CIS-3.1", category:"Rule Hygiene",      check:"No overly permissive any-any rules", pass: !mappedRules.some(r=>r.overpermissive&&r.action==="Allow") },
+      { id:"CIS-3.2", category:"Rule Hygiene",      check:"Services not set to any on allow rules", pass: mappedRules.filter(r=>r.action==="Allow").every(r=>!r.svcAny) },
+      { id:"CIS-4.1", category:"System Hardening", check:"PAN-OS version current", pass: null },
+      { id:"CIS-5.1", category:"Network Security", check:"Zones properly segregated", pass: null },
+    ];
+
+    return {
+      vendor:      "paloalto",
+      instance:    snap.instance || "Palo Alto",
+      hostname:    sys.hostname  || snap.instance || "Palo Alto",
+      version:     sys.version   || "",
+      policyCount: mappedRules.length,
+      enabledCount:mappedRules.filter(r=>r.status==="Enabled").length,
+      allowCount:  mappedRules.filter(r=>r.action==="Allow").length,
+      denyCount:   mappedRules.filter(r=>r.action==="Deny").length,
+      unusedRules: 0, // no hit counters from config API
+      overpermissive: mappedRules.filter(r=>r.overpermissive&&r.action==="Allow").length,
+      noLogging:   mappedRules.filter(r=>r.action==="Allow"&&r.status==="Enabled"&&r.logtraffic==="disable").length,
+      policies:    mappedRules,
+      bandwidth:   [],
+      cisBenchmark,
+      collectedAt: null,
+    };
+  }
+
+  // Build list of all firewall instances for the selector
+  const firewallInstances = [
+    ...(ft && Object.keys(ft).length ? [buildFortinetInstance(ft)] : []),
+    ...(pa && Object.keys(pa).length ? [buildPaloAltoInstance(pa)] : []),
+  ];
+
+  // Legacy flat shape kept for backward compat (overview widgets)
+  const ftP = ft.policies || []; const ftS = ft.stats || []; const paR = pa.rules || [];
+  const statsById2 = {}; ftS.forEach(s => { if (s.policyid!=null) statsById2[s.policyid]=s; });
+  const ftM = ftP.map(p=>{ const st=statsById2[p.policyid]||{}; return { name:p.name||`P${p.policyid}`, hits:st.packets||0, action:(p.action||"").toLowerCase()==="accept"?"Allow":"Deny" }; });
+  const paM = paR.map(r=>({ name:r["@name"]||"Rule", hits:0, action:(r.action||"allow").toLowerCase()==="deny"?"Deny":"Allow" }));
   const firewall = {
-    instance:    ft.instance || pa.instance || "",
-    topPolicies: allPolicies,
-    blockedToday,
-    allowedToday,
-    policyCount: ftPolicies.length + paRules.length,
-    // trafficByHour / topThreatCountries require log DB access — not available from config API
-    trafficByHour:      [],
-    topThreatCountries: [],
-    // raw data kept for future use
-    policies: ftPolicies,
-    stats:    ftStats,
-    rules:    paRules,
+    instances:   firewallInstances,
+    topPolicies: [...ftM,...paM].sort((a,b)=>b.hits-a.hits).slice(0,10),
+    blockedToday: ftM.filter(p=>p.action==="Deny").reduce((s,p)=>s+p.hits,0),
+    allowedToday: ftM.filter(p=>p.action==="Allow").reduce((s,p)=>s+p.hits,0),
+    policyCount:  ftP.length + paR.length,
+    trafficByHour:[], topThreatCountries:[],
+    policies: ftP, stats: ftS, rules: paR,
   };
 
   // ── SIEM ────────────────────────────────────────────────────────────────
@@ -1587,102 +1692,342 @@ function VulnerabilitiesPage({ data }) {
 function FirewallPage({ data }) {
   const d = data || {};
   if (!d._hasData) return <NoData icon="🔥" title="No firewall data yet" message="Connect Fortinet or Palo Alto in ⚙️ Settings to see live firewall analytics." />;
-  const fw = d.firewall || {};
-  const policies  = fw.topPolicies || [];
-  const blocked   = fw.blockedToday || 0;
-  const allowed   = fw.allowedToday || 0;
-  const total     = blocked + allowed;
-  const blockRate = total > 0 ? Math.round(blocked / total * 100) : 0;
-  const hasTraffic = fw.trafficByHour?.length > 0;
-  const hasCountries = fw.topThreatCountries?.length > 0;
+
+  const instances = d.firewall?.instances || [];
+  const [selIdx,   setSelIdx]   = React.useState(0);
+  const [tab,      setTab]      = React.useState("overview");  // overview | rules | bandwidth | cis
+  const [ruleFilter, setRuleFilter] = React.useState("all");   // all | allow | deny | disabled | risk
+
+  const fw = instances[selIdx] || instances[0] || {};
+  const policies  = fw.policies  || [];
+  const bandwidth = fw.bandwidth || [];
+  const cis       = fw.cisBenchmark || [];
+
+  const cisPass    = cis.filter(c=>c.pass===true).length;
+  const cisFail    = cis.filter(c=>c.pass===false).length;
+  const cisUnknown = cis.filter(c=>c.pass===null).length;
+  const cisScore   = cis.length ? Math.round((cisPass / (cisPass+cisFail||1))*100) : null;
+
+  const filteredRules = policies.filter(p => {
+    if (ruleFilter === "allow")    return p.action === "Allow";
+    if (ruleFilter === "deny")     return p.action === "Deny";
+    if (ruleFilter === "disabled") return p.status === "Disabled";
+    if (ruleFilter === "risk")     return p.overpermissive || (p.action==="Allow"&&(!p.logtraffic||p.logtraffic==="disable"));
+    return true;
+  });
+
+  const tabBtn = (id, label, badge) => (
+    <button onClick={()=>setTab(id)} style={{
+      padding:"8px 18px", borderRadius:8, border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
+      background: tab===id ? C.primary : "transparent",
+      color: tab===id ? "white" : C.muted,
+      display:"flex", alignItems:"center", gap:6,
+    }}>
+      {label}
+      {badge != null && <span style={{ fontSize:10, fontWeight:800, padding:"1px 6px", borderRadius:8,
+        background: tab===id ? "rgba(255,255,255,0.25)" : C.border, color: tab===id?"white":C.text }}>{badge}</span>}
+    </button>
+  );
+
   return (
     <div>
-      <SectionTitle title="Firewall Analytics – Fortinet & Palo Alto" subtitle="Policy inventory, hit counts and traffic statistics" />
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
-        <MetricCard icon="📋" label="Total Policies" value={(fw.policyCount||policies.length).toLocaleString()} sub="Configured rules" color={C.primary}/>
-        <MetricCard icon="✅" label="Allow Rules" value={policies.filter(p=>p.action==="Allow").length} sub="Permit policies" color={C.ok}/>
-        <MetricCard icon="🚫" label="Deny Rules" value={policies.filter(p=>p.action==="Deny").length} sub="Block policies" color={C.critical}/>
-        <MetricCard icon="📊" label="Packet Hits" value={total > 0 ? total.toLocaleString() : "—"} sub="Total across all policies" color={C.primaryLight}/>
-      </div>
-      {hasTraffic ? (
-        <Card style={{ padding:20, marginBottom:16 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Traffic Volume – Last 24 Hours</div>
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={fw.trafficByHour} margin={{top:5,right:10,left:-10,bottom:0}}>
-              <defs>
-                <linearGradient id="blockGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={C.critical} stopOpacity={0.3}/><stop offset="95%" stopColor={C.critical} stopOpacity={0}/>
-                </linearGradient>
-                <linearGradient id="allowGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={C.ok} stopOpacity={0.3}/><stop offset="95%" stopColor={C.ok} stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
-              <XAxis dataKey="hour" tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false} interval={3}/>
-              <YAxis tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}/>
-              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}/>
-              <Legend iconType="circle" wrapperStyle={{fontSize:12}}/>
-              <Area type="monotone" dataKey="allowed" name="Allowed" stroke={C.ok} fill="url(#allowGrad)" strokeWidth={2}/>
-              <Area type="monotone" dataKey="blocked" name="Blocked" stroke={C.critical} fill="url(#blockGrad)" strokeWidth={2}/>
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
-      ) : null}
-      <div style={{ display:"grid", gridTemplateColumns: hasCountries ? "1fr 1fr" : "1fr", gap:16 }}>
-        <Card style={{ padding:20 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>
-            Firewall Policy List {policies.length > 0 && <span style={{ fontSize:11, fontWeight:400, color:C.muted }}>({policies.length} rules)</span>}
+      <SectionTitle title="Firewall Analytics" subtitle="Per-device policy review, bandwidth utilisation and CIS benchmark assessment" />
+
+      {/* ── Instance selector ── */}
+      {instances.length > 1 && (
+        <div style={{ display:"flex", gap:8, marginBottom:20, flexWrap:"wrap" }}>
+          {instances.map((inst,i) => (
+            <button key={i} onClick={()=>{ setSelIdx(i); setTab("overview"); }} style={{
+              padding:"8px 16px", borderRadius:10, border:`2px solid ${selIdx===i?C.primary:C.border}`,
+              background: selIdx===i ? `${C.primary}10` : "white",
+              color: selIdx===i ? C.primary : C.text,
+              fontSize:13, fontWeight:600, cursor:"pointer", display:"flex", alignItems:"center", gap:8,
+            }}>
+              <span>{inst.vendor==="fortinet"?"🛡️":"🔵"}</span>
+              <span>{inst.hostname||inst.instance}</span>
+              <span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>{inst.vendor==="fortinet"?"FortiGate":"PAN-OS"}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {instances.length === 0 ? (
+        <Card style={{ padding:32, textAlign:"center", color:C.muted }}>No firewall data collected yet. Save credentials and click Collect Now.</Card>
+      ) : (
+      <div>
+        {/* ── Device header ── */}
+        <Card style={{ padding:16, marginBottom:16, display:"flex", alignItems:"center", gap:20, flexWrap:"wrap" }}>
+          <div style={{ fontSize:36 }}>{fw.vendor==="fortinet"?"🛡️":"🔵"}</div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:16, fontWeight:700, color:C.text }}>{fw.hostname||fw.instance}</div>
+            <div style={{ fontSize:12, color:C.muted }}>{fw.vendor==="fortinet"?"Fortinet FortiGate":"Palo Alto Networks"} {fw.version&&`• v${fw.version}`} {fw.host&&`• ${fw.host}`}</div>
+            {fw.collectedAt && <div style={{ fontSize:11, color:C.muted }}>Last collected: {new Date(fw.collectedAt).toLocaleString()}</div>}
           </div>
-          {policies.length === 0 ? (
-            <div style={{ textAlign:"center", color:C.muted, fontSize:13, padding:"24px 0" }}>
-              No policy data yet — policies will appear after a successful collection
-            </div>
-          ) : (
-          <table style={{ width:"100%", borderCollapse:"collapse" }}>
-            <thead><tr>
-              <th style={{ padding:"8px 10px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Policy Name</th>
-              <th style={{ padding:"8px 10px", textAlign:"right", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Packets</th>
-              <th style={{ padding:"8px 10px", textAlign:"center", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>Action</th>
-            </tr></thead>
-            <tbody>{policies.map((p,i)=>(
-              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
-                <td style={{ padding:"10px 10px", fontSize:12, color:C.text }}>{p.name}</td>
-                <td style={{ padding:"10px 10px", fontSize:13, fontWeight:700, color:C.text, textAlign:"right" }}>
-                  {p.hits > 0 ? p.hits.toLocaleString() : "—"}
-                </td>
-                <td style={{ padding:"10px 10px", textAlign:"center" }}>
-                  <span style={{ fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:10,
-                    background:p.action==="Allow"?"#f0fdf4":p.action==="Deny"?"#fef2f2":"#f8fafc",
-                    color:p.action==="Allow"?C.ok:p.action==="Deny"?C.critical:C.muted }}>{p.action}</span>
-                </td>
-              </tr>
-            ))}</tbody>
-          </table>
-          )}
+          <div style={{ display:"flex", gap:24 }}>
+            {[
+              {label:"Total Rules", value:fw.policyCount||0, color:C.primary},
+              {label:"Allow",       value:fw.allowCount||0,  color:C.ok},
+              {label:"Deny",        value:fw.denyCount||0,   color:C.critical},
+              {label:"Disabled",    value:(fw.policyCount||0)-(fw.enabledCount||0), color:C.muted},
+            ].map(m=>(
+              <div key={m.label} style={{ textAlign:"center" }}>
+                <div style={{ fontSize:24, fontWeight:800, color:m.color }}>{m.value}</div>
+                <div style={{ fontSize:11, color:C.muted }}>{m.label}</div>
+              </div>
+            ))}
+          </div>
         </Card>
-        {hasCountries && (
-        <Card style={{ padding:20 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Threat Source Countries</div>
-          {fw.topThreatCountries.map((c,i)=>(
-            <div key={c.country} style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
-              <div style={{ width:28, height:28, background:`${C.critical}15`, borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:C.critical }}>{i+1}</div>
-              <div style={{ flex:1 }}>
-                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
-                  <span style={{ fontSize:12, fontWeight:600, color:C.text }}>{c.country}</span>
-                  <span style={{ fontSize:12, color:C.muted }}>{c.count.toLocaleString()}</span>
+
+        {/* ── Risk indicators ── */}
+        {(fw.unusedRules>0||fw.overpermissive>0||fw.noLogging>0) && (
+          <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>
+            {fw.unusedRules>0 && <div style={{ padding:"8px 14px", borderRadius:8, background:"#fef3c7", border:"1px solid #fcd34d", fontSize:12, fontWeight:600, color:"#92400e" }}>⚠️ {fw.unusedRules} unused rules (zero hits)</div>}
+            {fw.overpermissive>0 && <div style={{ padding:"8px 14px", borderRadius:8, background:"#fef2f2", border:"1px solid #fca5a5", fontSize:12, fontWeight:600, color:C.critical }}>🚨 {fw.overpermissive} any→any allow rules</div>}
+            {fw.noLogging>0 && <div style={{ padding:"8px 14px", borderRadius:8, background:"#fef2f2", border:"1px solid #fca5a5", fontSize:12, fontWeight:600, color:C.critical }}>📋 {fw.noLogging} allow rules with logging off</div>}
+          </div>
+        )}
+
+        {/* ── Tab bar ── */}
+        <div style={{ display:"flex", gap:4, marginBottom:16, background:"#f8fafc", borderRadius:10, padding:4, width:"fit-content" }}>
+          {tabBtn("overview",  "Overview")}
+          {tabBtn("rules",     "Security Rules", fw.policyCount||0)}
+          {tabBtn("bandwidth", "Bandwidth", bandwidth.length||null)}
+          {tabBtn("cis",       "CIS Benchmark", cis.length||null)}
+        </div>
+
+        {/* ════ OVERVIEW TAB ════ */}
+        {tab==="overview" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            <Card style={{ padding:20 }}>
+              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Policy Summary</div>
+              {[
+                {label:"Total configured rules",    value:fw.policyCount||0},
+                {label:"Enabled rules",             value:fw.enabledCount||0},
+                {label:"Allow policies",            value:fw.allowCount||0},
+                {label:"Deny / Block policies",     value:fw.denyCount||0},
+                {label:"Unused rules (zero hits)",  value:fw.unusedRules??0,   warn:fw.unusedRules>0},
+                {label:"Any→Any allow rules",       value:fw.overpermissive??0, warn:fw.overpermissive>0},
+                {label:"Allow rules without logging",value:fw.noLogging??0,    warn:fw.noLogging>0},
+              ].map(r=>(
+                <div key={r.label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.border}` }}>
+                  <span style={{ fontSize:13, color:C.muted }}>{r.label}</span>
+                  <span style={{ fontSize:13, fontWeight:700, color:r.warn?C.critical:C.text }}>{r.value}</span>
                 </div>
-                <div style={{ height:6, background:"#f1f5f9", borderRadius:3 }}>
-                  <div style={{ height:"100%", width:`${(c.count/fw.topThreatCountries[0].count)*100}%`, background:`linear-gradient(90deg,${C.critical}aa,${C.critical})`, borderRadius:3 }}/>
+              ))}
+            </Card>
+            <Card style={{ padding:20 }}>
+              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Security Posture</div>
+              <div style={{ textAlign:"center", marginBottom:16 }}>
+                <div style={{ fontSize:56, fontWeight:900, color:cisScore>=80?C.ok:cisScore>=60?C.warn:C.critical }}>{cisScore??0}%</div>
+                <div style={{ fontSize:12, color:C.muted }}>CIS Benchmark Compliance</div>
+              </div>
+              <div style={{ display:"flex", gap:8, justifyContent:"center", marginBottom:16 }}>
+                <span style={{ padding:"4px 12px", borderRadius:8, background:"#f0fdf4", color:C.ok, fontSize:12, fontWeight:700 }}>✓ {cisPass} Pass</span>
+                <span style={{ padding:"4px 12px", borderRadius:8, background:"#fef2f2", color:C.critical, fontSize:12, fontWeight:700 }}>✗ {cisFail} Fail</span>
+                <span style={{ padding:"4px 12px", borderRadius:8, background:"#f8fafc", color:C.muted, fontSize:12, fontWeight:700 }}>? {cisUnknown} N/A</span>
+              </div>
+              <div style={{ height:8, background:C.border, borderRadius:4, overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${cisScore||0}%`, background:cisScore>=80?C.ok:cisScore>=60?C.warn:C.critical, borderRadius:4 }}/>
+              </div>
+              <button onClick={()=>setTab("cis")} style={{ marginTop:12, width:"100%", padding:"7px 0", borderRadius:8, border:`1px solid ${C.primary}`, background:`${C.primary}08`, color:C.primary, fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                View Full CIS Report →
+              </button>
+            </Card>
+            {/* Top rules by hit count */}
+            <Card style={{ padding:20, gridColumn:"1/-1" }}>
+              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Rules by Packet Hits</div>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr style={{ background:"#f8fafc" }}>
+                  {["Rule Name","Action","Src","Dst","Packets","Bytes","Logging"].map(h=>(
+                    <th key={h} style={{ padding:"8px 10px", textAlign:h==="Packets"||h==="Bytes"?"right":"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{[...policies].sort((a,b)=>b.packets-a.packets).slice(0,8).map((p,i)=>(
+                  <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                    <td style={{ padding:"9px 10px", fontSize:12, fontWeight:500, color:C.text }}>{p.name}</td>
+                    <td style={{ padding:"9px 10px" }}>
+                      <span style={{ fontSize:11, fontWeight:600, padding:"2px 8px", borderRadius:8, background:p.action==="Allow"?"#f0fdf4":"#fef2f2", color:p.action==="Allow"?C.ok:C.critical }}>{p.action}</span>
+                    </td>
+                    <td style={{ padding:"9px 10px", fontSize:11, color:C.muted, maxWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.srcaddr}</td>
+                    <td style={{ padding:"9px 10px", fontSize:11, color:C.muted, maxWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.dstaddr}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12, fontWeight:700, color:C.text, textAlign:"right" }}>{p.packets>0?p.packets.toLocaleString():"—"}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12, color:C.muted, textAlign:"right" }}>{p.bytes>0?(p.bytes/1024/1024).toFixed(1)+"MB":"—"}</td>
+                    <td style={{ padding:"9px 10px", textAlign:"left" }}>
+                      <span style={{ fontSize:10, padding:"2px 6px", borderRadius:6, background:p.logtraffic&&p.logtraffic!=="disable"?"#f0fdf4":"#fef2f2", color:p.logtraffic&&p.logtraffic!=="disable"?C.ok:C.critical }}>{p.logtraffic&&p.logtraffic!=="disable"?"On":"Off"}</span>
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </Card>
+          </div>
+        )}
+
+        {/* ════ SECURITY RULES TAB ════ */}
+        {tab==="rules" && (
+          <div>
+            <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap", alignItems:"center" }}>
+              <span style={{ fontSize:12, color:C.muted, fontWeight:600 }}>Filter:</span>
+              {[["all","All"],["allow","Allow"],["deny","Deny"],["disabled","Disabled"],["risk","⚠️ At Risk"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setRuleFilter(v)} style={{
+                  padding:"5px 12px", borderRadius:7, border:`1px solid ${ruleFilter===v?C.primary:C.border}`,
+                  background:ruleFilter===v?`${C.primary}10`:"white", color:ruleFilter===v?C.primary:C.muted,
+                  fontSize:12, fontWeight:600, cursor:"pointer",
+                }}>{l}</button>
+              ))}
+              <span style={{ marginLeft:"auto", fontSize:12, color:C.muted }}>{filteredRules.length} rule{filteredRules.length!==1?"s":""}</span>
+            </div>
+            <Card style={{ padding:0, overflow:"hidden" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr style={{ background:"#f8fafc" }}>
+                  {["#","Rule Name","Action","Source","Destination","Service","Logging","Status","Hits"].map(h=>(
+                    <th key={h} style={{ padding:"10px 10px", textAlign:h==="#"||h==="Hits"?"center":"left", fontSize:10, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}`, whiteSpace:"nowrap" }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{filteredRules.length === 0 ? (
+                  <tr><td colSpan={9} style={{ padding:24, textAlign:"center", color:C.muted, fontSize:13 }}>No rules match the selected filter</td></tr>
+                ) : filteredRules.map((p,i)=>{
+                  const isRisk = p.overpermissive || (p.action==="Allow"&&(!p.logtraffic||p.logtraffic==="disable"));
+                  return (
+                  <tr key={i} style={{ borderBottom:`1px solid ${C.border}`, background:isRisk?"#fffbeb":"white" }}>
+                    <td style={{ padding:"9px 10px", fontSize:11, color:C.muted, textAlign:"center" }}>{p.id}</td>
+                    <td style={{ padding:"9px 10px", fontSize:12, fontWeight:600, color:C.text }}>
+                      {isRisk && <span title="Risk: overpermissive or logging off" style={{ marginRight:4 }}>⚠️</span>}
+                      {p.name}
+                    </td>
+                    <td style={{ padding:"9px 10px" }}>
+                      <span style={{ fontSize:11, fontWeight:600, padding:"2px 7px", borderRadius:8, background:p.action==="Allow"?"#f0fdf4":p.action==="Deny"?"#fef2f2":"#f8fafc", color:p.action==="Allow"?C.ok:p.action==="Deny"?C.critical:C.muted }}>{p.action}</span>
+                    </td>
+                    <td style={{ padding:"9px 10px", fontSize:11, color:p.srcAny?C.critical:C.muted, maxWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={p.srcaddr}>{p.srcaddr}</td>
+                    <td style={{ padding:"9px 10px", fontSize:11, color:p.dstAny?C.critical:C.muted, maxWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={p.dstaddr}>{p.dstaddr}</td>
+                    <td style={{ padding:"9px 10px", fontSize:11, color:p.svcAny?C.warn:C.muted, maxWidth:100, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={p.service}>{p.service}</td>
+                    <td style={{ padding:"9px 10px", textAlign:"center" }}>
+                      <span style={{ fontSize:10, padding:"2px 6px", borderRadius:6, background:p.logtraffic&&p.logtraffic!=="disable"?"#f0fdf4":"#fef2f2", color:p.logtraffic&&p.logtraffic!=="disable"?C.ok:C.critical }}>{p.logtraffic&&p.logtraffic!=="disable"?"On":"Off"}</span>
+                    </td>
+                    <td style={{ padding:"9px 10px", textAlign:"center" }}>
+                      <span style={{ fontSize:10, padding:"2px 6px", borderRadius:6, background:p.status==="Enabled"?"#f0fdf4":"#f8fafc", color:p.status==="Enabled"?C.ok:C.muted }}>{p.status}</span>
+                    </td>
+                    <td style={{ padding:"9px 10px", fontSize:12, fontWeight:700, color:C.text, textAlign:"center" }}>{p.packets>0?p.packets.toLocaleString():"—"}</td>
+                  </tr>
+                )})}</tbody>
+              </table>
+            </Card>
+          </div>
+        )}
+
+        {/* ════ BANDWIDTH TAB ════ */}
+        {tab==="bandwidth" && (
+          bandwidth.length === 0 ? (
+            <Card style={{ padding:32, textAlign:"center" }}>
+              <div style={{ fontSize:32, marginBottom:12 }}>📡</div>
+              <div style={{ fontSize:14, fontWeight:600, color:C.text, marginBottom:6 }}>Bandwidth data not available</div>
+              <div style={{ fontSize:13, color:C.muted }}>Interface counters are fetched from FortiGate's monitor API.<br/>Ensure the API key has System → Monitor read access.</div>
+            </Card>
+          ) : (
+          <div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:12, marginBottom:16 }}>
+              {bandwidth.map((iface,i)=>(
+                <Card key={i} style={{ padding:16 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                    <span style={{ fontSize:13, fontWeight:700, color:C.text }}>{iface.name}</span>
+                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:6, background:iface.link==="Up"?"#f0fdf4":"#fef2f2", color:iface.link==="Up"?C.ok:C.critical, fontWeight:700 }}>{iface.link}</span>
+                  </div>
+                  {iface.speed && <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>{iface.speed}</div>}
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+                    <div style={{ textAlign:"center", background:"#f0fdf4", borderRadius:6, padding:"6px 4px" }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.ok }}>{iface.rxBps>0?(iface.rxBps/1024).toFixed(1)+"K":(iface.rxBytes/1024/1024).toFixed(1)+"MB"}</div>
+                      <div style={{ fontSize:10, color:C.muted }}>↓ RX{iface.rxBps>0?" bps":" total"}</div>
+                    </div>
+                    <div style={{ textAlign:"center", background:"#eff6ff", borderRadius:6, padding:"6px 4px" }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.primary }}>{iface.txBps>0?(iface.txBps/1024).toFixed(1)+"K":(iface.txBytes/1024/1024).toFixed(1)+"MB"}</div>
+                      <div style={{ fontSize:10, color:C.muted }}>↑ TX{iface.txBps>0?" bps":" total"}</div>
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+            <Card style={{ padding:20 }}>
+              <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Interface Bandwidth Detail</div>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr style={{ background:"#f8fafc" }}>
+                  {["Interface","Status","RX Total","TX Total","RX Rate","TX Rate"].map(h=>(
+                    <th key={h} style={{ padding:"8px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{bandwidth.map((iface,i)=>(
+                  <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                    <td style={{ padding:"10px 12px", fontSize:13, fontWeight:600, color:C.text }}>{iface.name}</td>
+                    <td style={{ padding:"10px 12px" }}>
+                      <span style={{ fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:8, background:iface.link==="Up"?"#f0fdf4":"#fef2f2", color:iface.link==="Up"?C.ok:C.critical }}>{iface.link}</span>
+                    </td>
+                    <td style={{ padding:"10px 12px", fontSize:12, color:C.text }}>{(iface.rxBytes/1024/1024).toFixed(1)} MB</td>
+                    <td style={{ padding:"10px 12px", fontSize:12, color:C.text }}>{(iface.txBytes/1024/1024).toFixed(1)} MB</td>
+                    <td style={{ padding:"10px 12px", fontSize:12, color:C.ok }}>{iface.rxBps>0?(iface.rxBps/1024).toFixed(1)+" Kbps":"—"}</td>
+                    <td style={{ padding:"10px 12px", fontSize:12, color:C.primary }}>{iface.txBps>0?(iface.txBps/1024).toFixed(1)+" Kbps":"—"}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </Card>
+          </div>
+          )
+        )}
+
+        {/* ════ CIS BENCHMARK TAB ════ */}
+        {tab==="cis" && (
+          <div>
+            <Card style={{ padding:20, marginBottom:16, display:"flex", alignItems:"center", gap:24, flexWrap:"wrap" }}>
+              <div style={{ textAlign:"center" }}>
+                <div style={{ fontSize:52, fontWeight:900, color:cisScore>=80?C.ok:cisScore>=60?C.warn:C.critical, lineHeight:1 }}>{cisScore??0}%</div>
+                <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>CIS Score</div>
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>CIS Firewall Benchmark – Configuration Review</div>
+                <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>Based on CIS Benchmark controls for firewall configuration. Checks are derived from live policy config pulled via API.</div>
+                <div style={{ display:"flex", gap:16 }}>
+                  <span style={{ fontSize:12, color:C.ok, fontWeight:700 }}>✓ {cisPass} Passing</span>
+                  <span style={{ fontSize:12, color:C.critical, fontWeight:700 }}>✗ {cisFail} Failing</span>
+                  <span style={{ fontSize:12, color:C.muted, fontWeight:700 }}>? {cisUnknown} Requires manual review</span>
                 </div>
               </div>
-            </div>
-          ))}
-        </Card>
+            </Card>
+            {["Access Control","Logging","Rule Hygiene","System Hardening","Network Security"].map(cat => {
+              const checks = cis.filter(c=>c.category===cat);
+              if (!checks.length) return null;
+              return (
+                <Card key={cat} style={{ padding:20, marginBottom:12 }}>
+                  <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:12, display:"flex", alignItems:"center", gap:8 }}>
+                    <span>{{  "Access Control":"🔐","Logging":"📋","Rule Hygiene":"🧹","System Hardening":"⚙️","Network Security":"🌐" }[cat]}</span>
+                    {cat}
+                    <span style={{ fontSize:11, color:C.muted, fontWeight:400 }}>— {checks.filter(c=>c.pass===true).length}/{checks.length} passing</span>
+                  </div>
+                  {checks.map(c=>(
+                    <div key={c.id} style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+                      <div style={{ width:20, height:20, borderRadius:"50%", background:c.pass===true?"#f0fdf4":c.pass===false?"#fef2f2":"#f8fafc", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, flexShrink:0, marginTop:1 }}>
+                        {c.pass===true?"✓":c.pass===false?"✗":"?"}
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontSize:12, fontWeight:600, color:C.text }}>{c.id}: {c.check}</div>
+                        {c.pass===false && <div style={{ fontSize:11, color:C.critical, marginTop:2 }}>⚠️ Control not met — review and remediate</div>}
+                        {c.pass===null  && <div style={{ fontSize:11, color:C.muted,    marginTop:2 }}>Requires manual review — cannot be determined via API</div>}
+                        {c.pass===true  && <div style={{ fontSize:11, color:C.ok,      marginTop:2 }}>Compliant</div>}
+                      </div>
+                      <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:8, flexShrink:0,
+                        background:c.pass===true?"#f0fdf4":c.pass===false?"#fef2f2":"#f8fafc",
+                        color:c.pass===true?C.ok:c.pass===false?C.critical:C.muted }}>
+                        {c.pass===true?"PASS":c.pass===false?"FAIL":"N/A"}
+                      </span>
+                    </div>
+                  ))}
+                </Card>
+              );
+            })}
+          </div>
         )}
       </div>
+      )}
     </div>
   );
 }
+
 
 // ── Attack Surface ───────────────────────────────────────────────────────────
 function AttackSurfacePage({ data }) {
