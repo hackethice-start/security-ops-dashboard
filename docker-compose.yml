@@ -5,9 +5,7 @@ version: "3.9"
 #   dashboard   :3000  React SPA (nginx)
 #   backend     :4000  SecOps data collection + integrations
 #   grc         :4001  GRC Compliance (DPDPA / PCI DSS / ISO 27001)
-#   vuln        :4002  Vulnerability Assessment orchestrator
 #   kali               External Kali Linux server (SSH) — configured in Settings
-#   zaproxy     :8080  OWASP ZAProxy web app scanner
 #   db          :5432  PostgreSQL 16 (shared by all backend services)
 
 services:
@@ -23,8 +21,6 @@ services:
       backend:
         condition: service_started
       grc:
-        condition: service_started
-      vuln:
         condition: service_started
     restart: unless-stopped
     networks:
@@ -92,70 +88,6 @@ services:
       timeout: 10s
       retries: 5
 
-  # ── Vulnerability Assessment Orchestrator ──────────────────────────────────
-  vuln:
-    build:
-      context: ./services/vuln
-      dockerfile: Dockerfile
-    ports:
-      - "4002:4002"
-    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
-    environment:
-      - POSTGRES_HOST=db
-      - POSTGRES_DB=${POSTGRES_DB:-secops}
-      - POSTGRES_USER=${POSTGRES_USER:-secops}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
-      - VULN_PORT=4002
-      - NODE_ENV=production
-      - JWT_SECRET=${JWT_SECRET:-secops-jwt-change-this-in-production}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - KALI_HOST=${KALI_HOST:-192.168.101.6}
-      - KALI_PORT=${KALI_PORT:-22}
-      - KALI_USER=${KALI_USER:-kali}
-      - KALI_PASS=${KALI_PASS:-kali}
-      - ZAP_URL=http://zaproxy:8080
-      - ZAP_API_KEY=${ZAP_API_KEY:-secops-zap-key}
-    depends_on:
-      db:
-        condition: service_started
-      zaproxy:
-        condition: service_started
-    restart: unless-stopped
-    networks:
-      - default
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:4002/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # ── OWASP ZAProxy — Web Application Scanner ────────────────────────────────
-  zaproxy:
-    image: ghcr.io/zaproxy/zaproxy:stable
-    ports:
-      - "8080:8080"
-      - "8090:8090"
-    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
-    command: >
-      zap.sh -daemon
-      -port 8080
-      -host 0.0.0.0
-      -config api.key=${ZAP_API_KEY:-secops-zap-key}
-      -config api.addrs.addr.name=.*
-      -config api.addrs.addr.regex=true
-      -config connection.timeoutInSecs=60
-    volumes:
-      - zap_data:/home/zap/.ZAP
-    restart: unless-stopped
-    networks:
-      - default
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY:-secops-zap-key}"]
-      interval: 30s
-      timeout: 15s
-      start_period: 120s
-      retries: 5
-
   # ── PostgreSQL 16 ──────────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
@@ -178,7 +110,6 @@ services:
 
 volumes:
   pg_data:
-  zap_data:
 
 networks:
   default:
