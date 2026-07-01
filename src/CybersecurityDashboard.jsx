@@ -5085,10 +5085,6 @@ function Dashboard({ user, onLogout }) {
   // Executive board nav — no Admin
   const execNav = [
     { id:"overview", icon:"🏠", label:"Security Posture" },
-    { id:"risk",     icon:"⚠️", label:"Risk & Compliance" },
-    { id:"threats",  icon:"🎯", label:"Threat Intelligence" },
-    { id:"cloud",    icon:"☁️", label:"Cloud Security" },
-    { id:"report",   icon:"📊", label:"Executive Report" },
   ];
   // Analyst nav — Admin visible here
   const analystNav = [
