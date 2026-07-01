@@ -26,7 +26,7 @@ jobs:
       - name: Check docker compose
         run: docker compose version || apt-get install -y docker-compose-plugin
 
-      - name: Free ports and remove stale containers
+      - name: Free ports, remove stale containers, prune disk
         run: |
           docker compose down --remove-orphans || true
           echo "--- Removing stale named containers ---"
@@ -38,6 +38,11 @@ jobs:
             docker stop "$CID" || true
             docker rm -f "$CID" || true
           done
+          echo "--- Pruning unused Docker images and build cache ---"
+          docker image prune -af --filter "until=24h" || true
+          docker builder prune -af --filter "until=24h" || true
+          echo "--- Disk usage after prune ---"
+          df -h /
           echo "Done"
 
       - name: Build images
