@@ -342,6 +342,43 @@ async function collectTaegis() {
   }
 }
 
+/* ── Ensure users table + seed defaults ─────────────────────────────────── */
+async function ensureUsersTable() {
+  try {
+    // Create table if it doesn't exist (safe to run every startup)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id            UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
+        username      VARCHAR(50) UNIQUE NOT NULL,
+        password_hash TEXT        NOT NULL,
+        role          VARCHAR(20) NOT NULL DEFAULT 'analyst'
+                      CHECK (role IN ('admin','analyst','executive')),
+        display_name  VARCHAR(100),
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        last_login    TIMESTAMPTZ
+      )
+    `);
+
+    // Seed default users if they don't exist
+    // Passwords: Admin@1234, Analyst@1234, Exec@1234  (bcrypt rounds=10)
+    const defaults = [
+      ["admin",     "$2b$10$xPVS0SLFABqopxeLLo/Da.uIgFP02UBeJY9j5oSjFfXpvemibFHdG", "admin",     "Administrator"],
+      ["analyst",   "$2b$10$BO0KL.LZ2VHVyVlcvcWkA.6Gs7mqAudfQ1Jf7SNwf5xM/7MN3QFtu", "analyst",   "Security Analyst"],
+      ["executive", "$2b$10$WYLNd9d7FJmd/sKq4VMyGeUDzzeLSrJgUkfcrj3.7d7d235i4ezOO", "executive", "Executive"],
+    ];
+    for (const [username, hash, role, display_name] of defaults) {
+      await pool.query(
+        `INSERT INTO users (username, password_hash, role, display_name)
+         VALUES ($1,$2,$3,$4) ON CONFLICT (username) DO NOTHING`,
+        [username, hash, role, display_name]
+      );
+    }
+    console.log("Users table ready — default users seeded (admin/analyst/executive)");
+  } catch(e) {
+    console.error("ensureUsersTable error:", e.message);
+  }
+}
+
 /* ── Ensure snapshot partitions exist for current + next 13 months ─────────── */
 async function ensurePartitions() {
   try {
@@ -741,6 +778,8 @@ app.listen(PORT, async () => {
       await new Promise(r => setTimeout(r, 3000));
     }
   }
+  // Create users table + seed defaults (safe to run on every startup)
+  await ensureUsersTable();
   // Ensure snapshot partitions exist (handles old DBs missing current month)
   await ensurePartitions();
   // Schedule collectors based on per-tool intervals
