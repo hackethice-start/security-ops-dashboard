@@ -64,9 +64,6 @@ jobs:
           echo ""
           echo "=== Backend logs ==="
           docker compose logs backend --tail 20
-          echo ""
-          echo "=== Vuln logs ==="
-          docker compose logs vuln --tail 20
 
       - name: Health check dashboard
         run: |
