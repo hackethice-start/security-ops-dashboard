@@ -872,7 +872,25 @@ app.post("/api/integrations/:tool/test", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Unknown tool" });
     }
 
+    // Save snapshot immediately on successful test so pages show data right away
     if (result !== null) {
+      try {
+        const TOOL_SAVERS = {
+          paloalto:     r => saveSnapshot("paloalto",     r),
+          upguard:      r => saveSnapshot("upguard",      r),
+          qualys:       r => saveSnapshot("qualys",       r),
+          manageengine: r => saveSnapshot("manageengine", r),
+          taegis:       r => saveSnapshot("taegis",       r),
+          azure:        r => saveSnapshot("azure",        r),
+        };
+        const saver = TOOL_SAVERS[tool];
+        if (saver && result) {
+          await saver(result);
+          await setStatus(tool, "connected");
+        }
+      } catch(saveErr) {
+        console.error(`[test] snapshot save failed for ${tool}:`, saveErr.message);
+      }
       res.json({ success: true, message: "Connection successful", sample });
     } else {
       const row = await pool.query("SELECT last_error FROM integrations WHERE tool_name=$1", [tool]);
@@ -894,6 +912,34 @@ app.delete("/api/integrations/:tool", requireAuth, async (req, res) => {
       [req.params.tool]
     );
     res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Debug: show snapshot table status + last collection times (admin only)
+app.get("/api/debug/snapshots", requireAuth, async (req, res) => {
+  try {
+    const counts = await pool.query(`
+      SELECT tool, COUNT(*) as count, MAX(collected_at) as last_collected
+      FROM snapshots GROUP BY tool ORDER BY tool
+    `);
+    const latest = await pool.query(`
+      SELECT DISTINCT ON (tool) tool, collected_at,
+        length(payload::text) as payload_bytes
+      FROM snapshots ORDER BY tool, collected_at DESC
+    `);
+    const integrations = await pool.query(`
+      SELECT tool_name, enabled, status, last_tested, last_error FROM integrations ORDER BY tool_name
+    `);
+    const partitions = await pool.query(`
+      SELECT tablename FROM pg_tables WHERE tablename LIKE 'snapshots_%' ORDER BY tablename
+    `);
+    res.json({
+      snapshot_counts: counts.rows,
+      latest_snapshots: latest.rows,
+      integrations: integrations.rows,
+      partitions: partitions.rows.map(r=>r.tablename),
+      server_time: new Date(),
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

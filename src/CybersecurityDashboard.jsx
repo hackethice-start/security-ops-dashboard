@@ -2012,7 +2012,31 @@ function VulnDetailModal({ vuln, onClose }) {
 // ── Vulnerability Deep Dive ──────────────────────────────────────────────────
 function VulnerabilitiesPage({ data }) {
   const d = data || {};
-  if (!d._hasData) return <NoData icon="🔍" title="No vulnerability data yet" message="Connect Qualys VMDR in ⚙️ Settings to see live vulnerability scan results." />;
+  const [collecting, setCollecting] = React.useState(false);
+  const [collectMsg, setCollectMsg] = React.useState("");
+  const collectNow = async () => {
+    setCollecting(true); setCollectMsg("");
+    try {
+      await apiFetch(`${API}/api/collect/qualys`, { method:"POST" });
+      setCollectMsg("✓ Collection started — reload in 30s");
+      setTimeout(() => window.location.reload(), 30000);
+    } catch(e) { setCollectMsg("✗ " + (e.message||"Failed")); }
+    finally { setCollecting(false); }
+  };
+  if (!d._hasData || !d.vulnerabilities?.length) return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:60, textAlign:"center" }}>
+      <div style={{ fontSize:52, marginBottom:16 }}>🔍</div>
+      <div style={{ fontSize:20, fontWeight:700, color:C.text, marginBottom:8 }}>No vulnerability data yet</div>
+      <div style={{ fontSize:14, color:C.muted, maxWidth:400, lineHeight:1.6, marginBottom:24 }}>
+        {d._hasData ? "Qualys credentials saved but no scan data collected yet." : "Connect Qualys VMDR in ⚙️ Settings to see live vulnerability scan results."}
+      </div>
+      <button onClick={collectNow} disabled={collecting} style={{ padding:"11px 24px", borderRadius:10, border:"none", background:collecting?"#94a3b8":C.primary, color:"white", fontSize:14, fontWeight:700, cursor:collecting?"not-allowed":"pointer" }}>
+        {collecting ? "⟳ Collecting…" : "🔄 Collect Qualys Data Now"}
+      </button>
+      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color:collectMsg.startsWith("✓")?C.ok:C.critical }}>{collectMsg}</div>}
+      <div style={{ marginTop:12, fontSize:12, color:C.muted }}>Qualys collection can take 30–60s</div>
+    </div>
+  );
   const [sort,    setSort]    = useState("severity");
   const [selected, setSelected] = useState(null);
   const SEV_ORDER = { Critical:0, High:1, Medium:2, Low:3 };
@@ -2114,8 +2138,6 @@ function VulnerabilitiesPage({ data }) {
 // ── Firewall Analytics ───────────────────────────────────────────────────────
 function FirewallPage({ data }) {
   const d = data || {};
-  if (!d._hasData) return <NoData icon="🔥" title="No firewall data yet" message="Connect Fortinet or Palo Alto in ⚙️ Settings to see live firewall analytics." />;
-
   const instances = d.firewall?.instances || [];
   const [selIdx,     setSelIdx]     = React.useState(0);
   const [tab,        setTab]        = React.useState("overview");
@@ -2123,16 +2145,46 @@ function FirewallPage({ data }) {
   const [collecting, setCollecting] = React.useState(false);
   const [collectMsg, setCollectMsg] = React.useState("");
 
-  const collectNow = async () => {
+  const collectNow = async (tool="fortinet") => {
     setCollecting(true); setCollectMsg("");
     try {
-      await apiFetch(`${API}/api/collect/fortinet`, { method:"POST" });
-      setCollectMsg("✓ Data refresh triggered — reload in 15s");
-      setTimeout(() => window.location.reload(), 15000);
+      await apiFetch(`${API}/api/collect/${tool}`, { method:"POST" });
+      setCollectMsg("✓ Collection started — page will reload in 20s");
+      setTimeout(() => window.location.reload(), 20000);
     } catch(e) {
-      setCollectMsg("✗ " + (e.message||"Collection failed"));
+      setCollectMsg("✗ " + (e.message||"Collection failed — check Settings"));
     } finally { setCollecting(false); }
   };
+
+  // No snapshot at all — show actionable empty state instead of plain NoData
+  if (!d._hasData || instances.length === 0) return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:60, textAlign:"center" }}>
+      <div style={{ fontSize:52, marginBottom:16 }}>🔥</div>
+      <div style={{ fontSize:20, fontWeight:700, color:C.text, marginBottom:8 }}>No firewall data yet</div>
+      <div style={{ fontSize:14, color:C.muted, maxWidth:420, lineHeight:1.6, marginBottom:24 }}>
+        {d._hasData
+          ? "Fortinet credentials are saved but no data has been collected yet."
+          : "Connect Fortinet or Palo Alto in ⚙️ Settings, then collect data below."}
+      </div>
+      <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap", justifyContent:"center" }}>
+        <button onClick={()=>collectNow("fortinet")} disabled={collecting} style={{
+          padding:"11px 24px", borderRadius:10, border:"none",
+          background: collecting ? "#94a3b8" : C.primary,
+          color:"white", fontSize:14, fontWeight:700, cursor: collecting?"not-allowed":"pointer",
+        }}>
+          {collecting ? "⟳ Collecting…" : "🔄 Collect Fortinet Data Now"}
+        </button>
+        <button onClick={()=>collectNow("paloalto")} disabled={collecting} style={{
+          padding:"11px 24px", borderRadius:10, border:`1px solid ${C.border}`,
+          background:"white", color:C.text, fontSize:14, fontWeight:600, cursor: collecting?"not-allowed":"pointer",
+        }}>
+          🔵 Collect Palo Alto Data
+        </button>
+      </div>
+      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color: collectMsg.startsWith("✓")?C.ok:C.critical }}>{collectMsg}</div>}
+      <div style={{ marginTop:24, fontSize:12, color:C.muted }}>Data auto-collects every 5 min once credentials are saved in ⚙️ Settings.</div>
+    </div>
+  );
 
   const fw = instances[selIdx] || instances[0] || {};
   const policies  = fw.policies  || [];
@@ -2704,7 +2756,28 @@ const ATTACK_SURFACE_TABS = [
 
 function AttackSurfacePage({ data }) {
   const d = data || {};
-  if (!d._hasData) return <NoData icon="🌐" title="No attack surface data yet" message="Connect UpGuard in ⚙️ Settings to see your external attack surface data." />;
+  const [collecting, setCollecting] = React.useState(false);
+  const [collectMsg, setCollectMsg] = React.useState("");
+  const collectNow = async () => {
+    setCollecting(true); setCollectMsg("");
+    try {
+      await apiFetch(`${API}/api/collect/upguard`, { method:"POST" });
+      setCollectMsg("✓ Collection started — reload in 20s");
+      setTimeout(() => window.location.reload(), 20000);
+    } catch(e) { setCollectMsg("✗ " + (e.message||"Failed")); }
+    finally { setCollecting(false); }
+  };
+  if (!d._hasData || !d.surface) return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:60, textAlign:"center" }}>
+      <div style={{ fontSize:52, marginBottom:16 }}>🌐</div>
+      <div style={{ fontSize:20, fontWeight:700, color:C.text, marginBottom:8 }}>No attack surface data yet</div>
+      <div style={{ fontSize:14, color:C.muted, maxWidth:400, lineHeight:1.6, marginBottom:24 }}>Connect UpGuard in ⚙️ Settings, then click below to pull your external attack surface score.</div>
+      <button onClick={collectNow} disabled={collecting} style={{ padding:"11px 24px", borderRadius:10, border:"none", background:collecting?"#94a3b8":C.primary, color:"white", fontSize:14, fontWeight:700, cursor:collecting?"not-allowed":"pointer" }}>
+        {collecting ? "⟳ Collecting…" : "🔄 Collect UpGuard Data Now"}
+      </button>
+      {collectMsg && <div style={{ marginTop:16, fontSize:13, fontWeight:600, color:collectMsg.startsWith("✓")?C.ok:C.critical }}>{collectMsg}</div>}
+    </div>
+  );
   const s = d.surface;
   const [tab, setTab] = useState("overview");
   const [riskFilter, setRiskFilter] = useState("All");
