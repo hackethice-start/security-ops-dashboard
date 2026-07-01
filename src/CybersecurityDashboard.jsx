@@ -105,7 +105,11 @@ function transformSnapshot(snap) {
   };
 
   // ── UpGuard risks ───────────────────────────────────────────────────────
-  const risks = ug.risks || ug.domain_risks || {};
+  // Backend returns: { risks: { risks: [...] }, breachsight: { score: N } }
+  const risks = {
+    risks: Array.isArray(ug.risks?.risks) ? ug.risks.risks : [],
+    score: ug.breachsight?.score || ug.risks?.score || null,
+  };
 
   // ── Azure (flatten secureScore to a number) ──────────────────────────────
   const azFull = {

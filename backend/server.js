@@ -196,12 +196,19 @@ async function collectUpGuard() {
   const c = await getCreds("upguard");
   if (!c) return null;
   try {
-    const headers = { Authorization: `Token token=${c.apikey}` };
-    const [risks, domain] = await Promise.all([
-      http.get("https://cyber-risk.upguard.com/api/public/v1/risks", { headers }),
-      http.get("https://cyber-risk.upguard.com/api/public/v1/domains/risks", { headers }),
+    // Auth: pass API key directly in Authorization header (no "Token token=" prefix)
+    // Endpoint: /api/public/risks (no v1 in path)
+    const headers = { Authorization: c.apikey };
+    const base = "https://cyber-risk.upguard.com/api/public";
+    const [risksRes, scoreRes] = await Promise.all([
+      http.get(`${base}/risks`, { headers }),
+      http.get(`${base}/breachsight`, { headers }).catch(() => ({ data: {} })),
     ]);
-    const snap = { source:"upguard", risks: risks.data||{}, domain_risks: domain.data||{} };
+    const snap = {
+      source: "upguard",
+      risks: risksRes.data || {},
+      breachsight: scoreRes.data || {},
+    };
     await saveSnapshot("upguard", snap);
     await setStatus("upguard", "connected");
     return snap;
@@ -209,6 +216,7 @@ async function collectUpGuard() {
     const msg = e.response
       ? e.response.status === 401 ? "HTTP 401 — invalid API key"
       : e.response.status === 403 ? "HTTP 403 — API key lacks required permissions"
+      : e.response.status === 404 ? "HTTP 404 — endpoint not found (check API key permissions)"
       : `HTTP ${e.response.status} from UpGuard API`
       : e.message;
     await setStatus("upguard", "error", msg);
@@ -696,10 +704,11 @@ app.post("/api/integrations/:tool/test", requireAuth, async (req, res) => {
     } else if (tool === "upguard") {
       result = await withTimeout(collectUpGuard(), TIMEOUT, "UpGuard");
       if (result) {
-        const risks = result.risks?.risks||result.risks||{};
+        const risksArr = Array.isArray(result.risks?.risks) ? result.risks.risks : [];
+        const score = result.breachsight?.score || result.risks?.score || "N/A";
         sample = {
-          score: risks.score||risks.security_score||"N/A",
-          risks_found: Array.isArray(risks.risks) ? risks.risks.length : "connected",
+          score,
+          risks_found: risksArr.length,
           message: "UpGuard API reachable"
         };
       }
