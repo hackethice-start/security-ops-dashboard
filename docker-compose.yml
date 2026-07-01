@@ -54,7 +54,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     networks:
       - default
@@ -82,7 +82,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:-secops-jwt-change-this-in-production}
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     networks:
       - default
@@ -117,9 +117,9 @@ services:
       - ZAP_API_KEY=${ZAP_API_KEY:-secops-zap-key}
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_started
       zaproxy:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     networks:
       - default
