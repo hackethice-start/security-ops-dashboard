@@ -15,13 +15,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Ensure docker compose plugin is installed
+      - name: Install docker compose if missing
         run: |
-          if ! docker compose version &>/dev/null; then
-            sudo apt-get update -y
-            sudo apt-get install -y docker-compose-plugin
+          if docker compose version &>/dev/null 2>&1; then
+            echo "docker compose (plugin) found"
+            echo "COMPOSE_CMD=docker compose" >> $GITHUB_ENV
+          elif command -v docker-compose &>/dev/null 2>&1; then
+            echo "docker-compose (v1) found"
+            echo "COMPOSE_CMD=docker-compose" >> $GITHUB_ENV
+          else
+            echo "Installing docker-compose..."
+            sudo curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+            echo "COMPOSE_CMD=docker-compose" >> $GITHUB_ENV
           fi
-          docker compose version
 
       - name: Write .env file
         env:
@@ -79,9 +86,9 @@ jobs:
       - name: Build and start stack
         working-directory: /opt/secops
         run: |
-          docker compose down --remove-orphans || true
-          docker compose up --detach --build
-          docker compose ps
+          ${COMPOSE_CMD} down --remove-orphans || true
+          ${COMPOSE_CMD} up --detach --build
+          ${COMPOSE_CMD} ps
 
       - name: Clean up old images
         run: docker image prune --force
