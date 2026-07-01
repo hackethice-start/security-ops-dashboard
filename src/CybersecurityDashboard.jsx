@@ -85,7 +85,9 @@ function transformSnapshot(snap) {
   function buildFortinetInstance(snap) {
     const policies = Array.isArray(snap.policies) ? snap.policies : [];
     const stats    = Array.isArray(snap.stats)    ? snap.stats    : [];
-    const ifaces   = Array.isArray(snap.interfaces) ? snap.interfaces : [];
+    // interfaces may be an array (new) or object keyed by name (old snapshot format)
+    const ifRaw  = snap.interfaces || {};
+    const ifaces = Array.isArray(ifRaw) ? ifRaw : Object.values(ifRaw);
     const sys      = snap.sysGlobal || {};
 
     const statsById = {};
@@ -114,7 +116,7 @@ function transformSnapshot(snap) {
       };
     });
 
-    const bandwidth = ifaces.filter(i=>i.rx_bytes||i.tx_bytes).map(i=>({
+    const bandwidth = ifaces.filter(i=>i.rx_bytes||i.tx_bytes||i.in_bps||i.out_bps||i.link!=null).map(i=>({
       name:    i.name,
       rxBytes: i.rx_bytes || 0,
       txBytes: i.tx_bytes || 0,
@@ -2115,9 +2117,22 @@ function FirewallPage({ data }) {
   if (!d._hasData) return <NoData icon="🔥" title="No firewall data yet" message="Connect Fortinet or Palo Alto in ⚙️ Settings to see live firewall analytics." />;
 
   const instances = d.firewall?.instances || [];
-  const [selIdx,   setSelIdx]   = React.useState(0);
-  const [tab,      setTab]      = React.useState("overview");  // overview | rules | bandwidth | cis
-  const [ruleFilter, setRuleFilter] = React.useState("all");   // all | allow | deny | disabled | risk
+  const [selIdx,     setSelIdx]     = React.useState(0);
+  const [tab,        setTab]        = React.useState("overview");
+  const [ruleFilter, setRuleFilter] = React.useState("all");
+  const [collecting, setCollecting] = React.useState(false);
+  const [collectMsg, setCollectMsg] = React.useState("");
+
+  const collectNow = async () => {
+    setCollecting(true); setCollectMsg("");
+    try {
+      await apiFetch(`${API}/api/collect/fortinet`, { method:"POST" });
+      setCollectMsg("✓ Data refresh triggered — reload in 15s");
+      setTimeout(() => window.location.reload(), 15000);
+    } catch(e) {
+      setCollectMsg("✗ " + (e.message||"Collection failed"));
+    } finally { setCollecting(false); }
+  };
 
   const fw = instances[selIdx] || instances[0] || {};
   const policies  = fw.policies  || [];
@@ -2183,7 +2198,16 @@ function FirewallPage({ data }) {
             <div style={{ fontSize:16, fontWeight:700, color:C.text }}>{fw.hostname||fw.instance}</div>
             <div style={{ fontSize:12, color:C.muted }}>{fw.vendor==="fortinet"?"Fortinet FortiGate":"Palo Alto Networks"} {fw.version&&`• v${fw.version}`} {fw.host&&`• ${fw.host}`}</div>
             {fw.collectedAt && <div style={{ fontSize:11, color:C.muted }}>Last collected: {new Date(fw.collectedAt).toLocaleString()}</div>}
+            {collectMsg && <div style={{ fontSize:11, marginTop:4, color: collectMsg.startsWith("✓")?C.ok:C.critical, fontWeight:600 }}>{collectMsg}</div>}
           </div>
+          <button onClick={collectNow} disabled={collecting} style={{
+            padding:"8px 16px", borderRadius:8, border:`1px solid ${C.primary}`,
+            background: collecting ? "#f0f9ff" : `${C.primary}10`,
+            color:C.primary, fontSize:12, fontWeight:700, cursor: collecting?"not-allowed":"pointer",
+            display:"flex", alignItems:"center", gap:6,
+          }}>
+            {collecting ? "⟳ Collecting…" : "🔄 Collect Now"}
+          </button>
           <div style={{ display:"flex", gap:24 }}>
             {[
               {label:"Total Rules", value:fw.policyCount||0, color:C.primary},
