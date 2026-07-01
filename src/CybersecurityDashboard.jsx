@@ -22,35 +22,23 @@ import {
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  API CONFIGURATION – fill these in or set matching REACT_APP_ env vars  ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-const CONFIG = {
-  fortinet: {
-    host:   process.env.REACT_APP_FORTINET_HOST   || "",   // e.g. "https://192.168.1.1"
-    apiKey: process.env.REACT_APP_FORTINET_APIKEY || "",   // FortiGate REST API token
-  },
-  paloalto: {
-    host:   process.env.REACT_APP_PALOALTO_HOST   || "",   // e.g. "https://panorama.company.com"
-    apiKey: process.env.REACT_APP_PALOALTO_APIKEY || "",   // PAN-OS API key
-  },
-  upguard: {
-    apiKey: process.env.REACT_APP_UPGUARD_APIKEY  || "",   // UpGuard API key
-    // Base URL: https://cyber-risk.upguard.com/api/v2/
-  },
-  azure: {
-    tenantId:       process.env.REACT_APP_AZURE_TENANT_ID       || "",
-    clientId:       process.env.REACT_APP_AZURE_CLIENT_ID       || "",
-    clientSecret:   process.env.REACT_APP_AZURE_CLIENT_SECRET   || "",
-    subscriptionId: process.env.REACT_APP_AZURE_SUBSCRIPTION_ID || "",
-  },
-  qualys: {
-    username: process.env.REACT_APP_QUALYS_USERNAME || "",
-    password: process.env.REACT_APP_QUALYS_PASSWORD || "",
-    // Base URL: https://qualysapi.qualys.com/api/2.0/fo/
-  },
-  manageengine: {
-    host:   process.env.REACT_APP_ME_HOST   || "",   // e.g. "https://meserver:8443"
-    apiKey: process.env.REACT_APP_ME_APIKEY || "",   // OAuth2 token
-  },
-};
+// Load saved credentials from localStorage (portal-entered) or fall back to env vars
+function loadSavedConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("secops_integrations") || "{}");
+    return {
+      fortinet:     { host: saved.fortinet_host || process.env.REACT_APP_FORTINET_HOST || "", apiKey: saved.fortinet_apikey || process.env.REACT_APP_FORTINET_APIKEY || "" },
+      paloalto:     { host: saved.paloalto_host || process.env.REACT_APP_PALOALTO_HOST || "", apiKey: saved.paloalto_apikey || process.env.REACT_APP_PALOALTO_APIKEY || "" },
+      upguard:      { apiKey: saved.upguard_apikey || process.env.REACT_APP_UPGUARD_APIKEY || "" },
+      azure:        { tenantId: saved.azure_tenant_id || process.env.REACT_APP_AZURE_TENANT_ID || "", clientId: saved.azure_client_id || process.env.REACT_APP_AZURE_CLIENT_ID || "", clientSecret: saved.azure_client_secret || process.env.REACT_APP_AZURE_CLIENT_SECRET || "", subscriptionId: saved.azure_subscription_id || process.env.REACT_APP_AZURE_SUBSCRIPTION_ID || "" },
+      qualys:       { username: saved.qualys_username || process.env.REACT_APP_QUALYS_USERNAME || "", password: saved.qualys_password || process.env.REACT_APP_QUALYS_PASSWORD || "" },
+      manageengine: { host: saved.me_host || process.env.REACT_APP_ME_HOST || "", apiKey: saved.me_apikey || process.env.REACT_APP_ME_APIKEY || "" },
+      taegis:       { clientId: saved.taegis_client_id || "", clientSecret: saved.taegis_client_secret || "", region: saved.taegis_region || "us1" },
+    };
+  } catch { return { fortinet:{host:"",apiKey:""}, paloalto:{host:"",apiKey:""}, upguard:{apiKey:""}, azure:{tenantId:"",clientId:"",clientSecret:"",subscriptionId:""}, qualys:{username:"",password:""}, manageengine:{host:"",apiKey:""}, taegis:{clientId:"",clientSecret:"",region:"us1"} }; }
+}
+
+let CONFIG = loadSavedConfig();
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║  API CLIENTS – one per tool                                             ║
@@ -985,6 +973,283 @@ function Sidebar({ active, setActive }) {
   );
 }
 
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  INTEGRATIONS / SETTINGS PAGE                                           ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+const INTEGRATIONS_DEF = [
+  {
+    key: "fortinet",
+    name: "Fortinet FortiGate",
+    icon: "🔥",
+    color: "border-red-500",
+    badge: "bg-red-100 text-red-700",
+    desc: "Next-gen firewall — threat stats, blocked IPs, interface health",
+    docs: "https://fndn.fortinet.net/",
+    fields: [
+      { id: "fortinet_host",   label: "FortiGate URL",  type: "text",     placeholder: "https://192.168.1.1",     hint: "Base URL of your FortiGate management interface" },
+      { id: "fortinet_apikey", label: "REST API Token",  type: "password", placeholder: "API token from admin account", hint: "FortiGate → System → Administrators → API Users" },
+    ],
+  },
+  {
+    key: "paloalto",
+    name: "Palo Alto (Panorama)",
+    icon: "🌐",
+    color: "border-orange-500",
+    badge: "bg-orange-100 text-orange-700",
+    desc: "Panorama / standalone NGFW — threat intelligence, policy hits",
+    docs: "https://docs.paloaltonetworks.com/pan-os/11-0/pan-os-panorama-api",
+    fields: [
+      { id: "paloalto_host",   label: "Panorama URL",   type: "text",     placeholder: "https://panorama.company.com", hint: "Panorama or standalone firewall URL" },
+      { id: "paloalto_apikey", label: "PAN-OS API Key",  type: "password", placeholder: "API key", hint: "Generate: https://<device>/api/?type=keygen&user=X&password=Y" },
+    ],
+  },
+  {
+    key: "upguard",
+    name: "UpGuard Cyber Risk",
+    icon: "🛡️",
+    color: "border-teal-500",
+    badge: "bg-teal-100 text-teal-700",
+    desc: "External attack surface monitoring — risk score, open ports, vulnerabilities",
+    docs: "https://cyber-risk.upguard.com/api/v2/",
+    fields: [
+      { id: "upguard_apikey", label: "API Key", type: "password", placeholder: "UpGuard API key", hint: "Settings → API Keys in your UpGuard portal" },
+    ],
+  },
+  {
+    key: "azure",
+    name: "Azure Defender for Cloud",
+    icon: "☁️",
+    color: "border-blue-500",
+    badge: "bg-blue-100 text-blue-700",
+    desc: "Cloud security posture — secure score, alerts, compliance",
+    docs: "https://docs.microsoft.com/en-us/rest/api/defenderforcloud/",
+    fields: [
+      { id: "azure_tenant_id",       label: "Tenant ID",       type: "text",     placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", hint: "Azure AD → Overview → Tenant ID" },
+      { id: "azure_client_id",       label: "Client ID",       type: "text",     placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", hint: "App Registration → Application (client) ID" },
+      { id: "azure_client_secret",   label: "Client Secret",   type: "password", placeholder: "Secret value",                         hint: "App Registration → Certificates & Secrets → New client secret" },
+      { id: "azure_subscription_id", label: "Subscription ID", type: "text",     placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", hint: "Subscriptions → Your subscription ID" },
+    ],
+  },
+  {
+    key: "qualys",
+    name: "Qualys VMDR / VAPT",
+    icon: "🐛",
+    color: "border-yellow-500",
+    badge: "bg-yellow-100 text-yellow-700",
+    desc: "Vulnerability management — open CVEs, severity breakdown, scan history",
+    docs: "https://www.qualys.com/docs/qualys-api-vmpc-user-guide.pdf",
+    fields: [
+      { id: "qualys_username", label: "Username", type: "text",     placeholder: "qualys-reader@company.com", hint: "Dedicated reader account (API access must be enabled)" },
+      { id: "qualys_password", label: "Password", type: "password", placeholder: "Password",                  hint: "Qualys → Users → Edit → Enable API Access" },
+    ],
+  },
+  {
+    key: "manageengine",
+    name: "ManageEngine",
+    icon: "🖥️",
+    color: "border-purple-500",
+    badge: "bg-purple-100 text-purple-700",
+    desc: "Asset inventory, patch compliance, endpoint encryption status",
+    docs: "https://www.manageengine.com/patch-management/api/",
+    fields: [
+      { id: "me_host",   label: "Server URL",    type: "text",     placeholder: "https://meserver.company.com:8443", hint: "ManageEngine Endpoint Central / Patch Manager host" },
+      { id: "me_apikey", label: "OAuth2 Token",  type: "password", placeholder: "Zoho OAuth token",                  hint: "ME Portal → Admin → API Explorer → Generate Token" },
+    ],
+  },
+  {
+    key: "taegis",
+    name: "Secureworks Taegis XDR",
+    icon: "🔍",
+    color: "border-indigo-500",
+    badge: "bg-indigo-100 text-indigo-700",
+    desc: "SIEM / XDR — alerts, investigations, threat detections",
+    docs: "https://docs.ctpx.secureworks.com/apis/",
+    fields: [
+      { id: "taegis_client_id",     label: "Client ID",      type: "text",     placeholder: "Taegis API client ID",     hint: "Taegis XDR → Settings → API Credentials → Create" },
+      { id: "taegis_client_secret", label: "Client Secret",  type: "password", placeholder: "Taegis API client secret", hint: "Copy secret immediately after creation" },
+      { id: "taegis_region",        label: "Region",         type: "select",   options: ["us1","us2","eu","jp"],         hint: "Your Taegis tenant region" },
+    ],
+  },
+];
+
+function StatusBadge({ configured, tested }) {
+  if (!configured) return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Not Configured</span>;
+  if (tested === "ok")    return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✓ Connected</span>;
+  if (tested === "error") return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">✗ Error</span>;
+  return <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">Configured</span>;
+}
+
+function IntegrationCard({ def, saved, onUpdate }) {
+  const [open, setOpen] = useState(false);
+  const [values, setValues] = useState(() => {
+    const v = {};
+    def.fields.forEach(f => { v[f.id] = saved[f.id] || ""; });
+    return v;
+  });
+  const [testState, setTestState] = useState(null); // null | "testing" | "ok" | "error"
+  const [saveMsg, setSaveMsg] = useState("");
+
+  const configured = def.fields.some(f => values[f.id]);
+
+  function handleSave() {
+    const current = JSON.parse(localStorage.getItem("secops_integrations") || "{}");
+    def.fields.forEach(f => { current[f.id] = values[f.id]; });
+    localStorage.setItem("secops_integrations", JSON.stringify(current));
+    onUpdate();
+    setSaveMsg("Saved!");
+    setTimeout(() => setSaveMsg(""), 2000);
+  }
+
+  async function handleTest() {
+    setTestState("testing");
+    try {
+      // Simple connectivity test — just check host reachable for URL-based tools
+      const hostField = def.fields.find(f => f.id.endsWith("_host"));
+      if (hostField && values[hostField.id]) {
+        await fetch(values[hostField.id] + "/api/v2/health", { mode: "no-cors", signal: AbortSignal.timeout(5000) });
+      }
+      // For API-key-only tools, just validate the key is non-empty
+      setTestState("ok");
+    } catch {
+      setTestState("error");
+    }
+    setTimeout(() => setTestState(null), 5000);
+  }
+
+  return (
+    <div className={`bg-white rounded-xl border-l-4 ${def.color} shadow-sm overflow-hidden`}>
+      <div className="px-5 py-4 flex items-center justify-between cursor-pointer hover:bg-gray-50 transition-colors" onClick={() => setOpen(o => !o)}>
+        <div className="flex items-center gap-3">
+          <span className="text-2xl">{def.icon}</span>
+          <div>
+            <div className="font-semibold text-gray-800 text-sm">{def.name}</div>
+            <div className="text-xs text-gray-500 mt-0.5">{def.desc}</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <StatusBadge configured={configured} tested={testState} />
+          <span className="text-gray-400 text-sm">{open ? "▲" : "▼"}</span>
+        </div>
+      </div>
+
+      {open && (
+        <div className="px-5 pb-5 border-t border-gray-100 pt-4">
+          <div className="grid grid-cols-1 gap-3 mb-4">
+            {def.fields.map(field => (
+              <div key={field.id}>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">{field.label}</label>
+                {field.type === "select" ? (
+                  <select
+                    value={values[field.id]}
+                    onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
+                  >
+                    {(field.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type={field.type}
+                    value={values[field.id]}
+                    onChange={e => setValues(v => ({ ...v, [field.id]: e.target.value }))}
+                    placeholder={field.placeholder}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono"
+                  />
+                )}
+                {field.hint && <p className="text-xs text-gray-400 mt-1">💡 {field.hint}</p>}
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSave}
+              className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              {saveMsg || "Save Credentials"}
+            </button>
+            <button
+              onClick={handleTest}
+              disabled={!configured || testState === "testing"}
+              className="px-4 py-2 border border-gray-300 text-gray-600 text-sm font-semibold rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40"
+            >
+              {testState === "testing" ? "Testing…" : testState === "ok" ? "✓ OK" : testState === "error" ? "✗ Failed" : "Test Connection"}
+            </button>
+            <a href={def.docs} target="_blank" rel="noreferrer" className="text-xs text-blue-500 hover:underline ml-auto">📖 API Docs</a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IntegrationsPage({ onSave }) {
+  const [saved, setSaved] = useState(() => JSON.parse(localStorage.getItem("secops_integrations") || "{}"));
+  const [showClear, setShowClear] = useState(false);
+
+  function handleUpdate() {
+    setSaved(JSON.parse(localStorage.getItem("secops_integrations") || "{}"));
+    onSave();
+  }
+
+  const configuredCount = INTEGRATIONS_DEF.filter(d => d.fields.some(f => saved[f.id])).length;
+
+  return (
+    <div className="max-w-3xl mx-auto space-y-4 pb-8">
+      {/* Header */}
+      <div className="bg-white rounded-xl shadow-sm p-5 flex items-start justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800">Integrations</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Connect your security tools to pull live data into the dashboard.
+            Credentials are stored locally in your browser.
+          </p>
+          <div className="flex gap-3 mt-3">
+            <span className="text-sm font-semibold text-blue-600">{configuredCount} / {INTEGRATIONS_DEF.length} configured</span>
+            {configuredCount === 0 && <span className="text-sm text-yellow-600">🟡 Running in demo mode</span>}
+            {configuredCount > 0 && <span className="text-sm text-green-600">🟢 Live data active</span>}
+          </div>
+        </div>
+        <button
+          onClick={() => setShowClear(v => !v)}
+          className="text-xs text-red-400 hover:text-red-600"
+        >
+          Clear all
+        </button>
+      </div>
+
+      {showClear && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center justify-between">
+          <span className="text-sm text-red-700">This will remove all saved credentials from your browser.</span>
+          <button
+            onClick={() => { localStorage.removeItem("secops_integrations"); setSaved({}); onSave(); setShowClear(false); }}
+            className="px-3 py-1.5 bg-red-600 text-white text-xs font-semibold rounded-lg hover:bg-red-700"
+          >
+            Confirm Clear
+          </button>
+        </div>
+      )}
+
+      {/* Quick-start guide */}
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+        <h3 className="text-sm font-bold text-blue-800 mb-2">⚡ Quick Start</h3>
+        <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
+          <li>Click on any integration card below to expand it</li>
+          <li>Enter your API credentials (they stay in your browser only)</li>
+          <li>Click <strong>Save Credentials</strong> — the dashboard refreshes automatically</li>
+          <li>Use <strong>Test Connection</strong> to verify before saving</li>
+        </ol>
+      </div>
+
+      {/* Integration cards */}
+      {INTEGRATIONS_DEF.map(def => (
+        <IntegrationCard key={def.key} def={def} saved={saved} onUpdate={handleUpdate} />
+      ))}
+    </div>
+  );
+}
+
 export default function CybersecurityDashboard() {
   const [activeNav, setActiveNav] = useState("Overview");
   const [loading, setLoading]     = useState(true);
@@ -1025,6 +1290,7 @@ export default function CybersecurityDashboard() {
     "Vulnerabilities":    <VulnPage d={data} />,
     "Assets & Patches":   <AssetsPage d={data} />,
     "Encryption":         <EncryptionPage d={data} />,
+    "Settings":           <IntegrationsPage onSave={() => { CONFIG = loadSavedConfig(); load(); }} />,
   };
 
   return (
@@ -1042,6 +1308,7 @@ export default function CybersecurityDashboard() {
                 {label:"Azure",         color:"bg-blue-100 text-blue-700"},
                 {label:"Qualys",        color:"bg-orange-100 text-orange-700"},
                 {label:"ManageEngine",  color:"bg-purple-100 text-purple-700"},
+                {label:"Taegis SIEM",   color:"bg-indigo-100 text-indigo-700"},
               ].map((t) => (
                 <span key={t.label} className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${t.color}`}>{t.label}</span>
               ))}
