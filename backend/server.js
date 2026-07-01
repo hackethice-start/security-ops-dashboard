@@ -302,16 +302,21 @@ async function collectUpGuard() {
     // Endpoint: /api/public/risks (no v1 in path)
     const headers = { Authorization: c.apikey };
     const base = "https://cyber-risk.upguard.com/api/public";
-    const [risksRes, scoreRes, domainsRes] = await Promise.all([
+    const [risksRes, scoreRes, domainsRes, ipsRes] = await Promise.all([
       http.get(`${base}/risks`, { headers }),
       http.get(`${base}/breachsight`, { headers }).catch(() => ({ data: {} })),
-      http.get(`${base}/domains`, { headers }).catch(() => ({ data: {} })),
+      // domains returns: { domains:[{ hostname, primary_hostname, score, ip_addresses:[],
+      //   custom_domain_attributes:{ expiry_date }, typosquats:[] }] }
+      http.get(`${base}/domains`, { headers, params: { page_size: 100 } }).catch(() => ({ data: {} })),
+      // ips returns: { ips:[{ ip, score, open_ports:[{ port, service, transport }] }] }
+      http.get(`${base}/ips`, { headers, params: { page_size: 100 } }).catch(() => ({ data: {} })),
     ]);
     const snap = {
       source:      "upguard",
-      risks:       risksRes.data   || {},   // { risks:[{id,finding,severity,hostnames,...}] }
-      breachsight: scoreRes.data   || {},   // { score:N, grade:"A" } — may 404 on some plans
-      domains:     domainsRes.data || {},   // { domains:[{hostname,...}] }
+      risks:       risksRes.data   || {},   // { risks:[{id,finding,severity,hostnames,firstDetected,...}] }
+      breachsight: scoreRes.data   || {},   // { score, grade, ranges:{ excellent,... } }
+      domains:     domainsRes.data || {},   // { domains:[{hostname, score, ip_addresses, custom_domain_attributes}] }
+      ips:         ipsRes.data     || {},   // { ips:[{ip, score, open_ports:[{port,service}]}] }
     };
     await saveSnapshot("upguard", snap);
     await setStatus("upguard", "connected");

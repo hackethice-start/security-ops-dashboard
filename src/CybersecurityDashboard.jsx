@@ -339,15 +339,68 @@ function transformSnapshot(snap) {
   // UpGuard scores can be 0-950 scale — normalise to 0-100 for display
   const ugScoreDisplay = ugScore !== null ? (ugScore > 100 ? Math.round(ugScore/9.5) : ugScore) : null;
 
-  // Domain count from /domains endpoint
-  const ugDomains = Array.isArray(ug.domains?.domains) ? ug.domains.domains : [];
+  // ── UpGuard: full surface data ───────────────────────────────────────────
+  const ugDomainsRaw = Array.isArray(ug.domains?.domains) ? ug.domains.domains : [];
+  const ugIpsRaw     = Array.isArray(ug.ips?.ips)         ? ug.ips.ips         : [];
   const risks = { risks: ugRisksArr, score: ugScore };   // kept for backward compat
 
+  // Build enriched domains list
+  const ugDomainsList = ugDomainsRaw.map(d => {
+    const expStr = d.custom_domain_attributes?.expiry_date || d.expiry_date || null;
+    const expDate = expStr ? new Date(expStr) : null;
+    const daysToExp = expDate ? Math.ceil((expDate - Date.now()) / 86400000) : null;
+    const grade = d.score != null
+      ? (d.score >= 900 ? "A" : d.score >= 800 ? "B+" : d.score >= 700 ? "B" : d.score >= 600 ? "C+" : d.score >= 500 ? "C" : "D")
+      : null;
+    return {
+      hostname:   d.hostname || d.primary_hostname || "—",
+      score:      d.score != null ? (d.score > 100 ? Math.round(d.score / 9.5) : d.score) : null,
+      grade,
+      ips:        Array.isArray(d.ip_addresses) ? d.ip_addresses : [],
+      expiry:     expDate ? expDate.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—",
+      daysToExp,
+      status:     !expDate ? "unknown" : daysToExp < 0 ? "expired" : daysToExp < 30 ? "critical" : daysToExp < 90 ? "warning" : "ok",
+    };
+  });
+
+  // Build enriched IPs list
+  const ugIpsList = ugIpsRaw.map(ip => ({
+    ip:        ip.ip || "—",
+    score:     ip.score != null ? (ip.score > 100 ? Math.round(ip.score / 9.5) : ip.score) : null,
+    openPorts: Array.isArray(ip.open_ports)
+      ? ip.open_ports.map(p => ({ port: p.port, service: p.service || "—", transport: p.transport || "tcp" }))
+      : [],
+  }));
+
+  // Extract SSL certificate info from domains (when UpGuard provides ssl_certs field)
+  const ugCertsList = ugDomainsRaw
+    .filter(d => d.ssl_certificate || d.ssl_certs || d.certificates)
+    .flatMap(d => {
+      const certs = d.certificates || d.ssl_certs || (d.ssl_certificate ? [d.ssl_certificate] : []);
+      return certs.map(c => {
+        const expStr = c.valid_to || c.expiry_date || c.not_after || null;
+        const expDate = expStr ? new Date(expStr) : null;
+        const daysToExp = expDate ? Math.ceil((expDate - Date.now()) / 86400000) : null;
+        return {
+          domain:    d.hostname || d.primary_hostname || "—",
+          subject:   c.subject || c.common_name || d.hostname || "—",
+          issuer:    c.issuer || c.issuer_name || "—",
+          validFrom: c.valid_from || c.not_before ? new Date(c.valid_from || c.not_before).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—",
+          validTo:   expDate ? expDate.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—",
+          daysToExp,
+          status:    !expDate ? "unknown" : daysToExp < 0 ? "expired" : daysToExp < 14 ? "critical" : daysToExp < 30 ? "warning" : "ok",
+        };
+      });
+    });
+
+  // Count unique open ports across all IPs for the summary metric
+  const ugAllOpenPorts = new Set(ugIpsList.flatMap(i => i.openPorts.map(p => p.port)));
+
   // Map to the shape AttackSurfacePage reads (d.surface)
-  const surface = ugScore !== null || ugRisksArr.length > 0 ? {
-    score:    ugScoreDisplay ?? 0,
-    grade:    ugGrade ?? "N/A",
-    findings: ugRisksArr.map(r => ({
+  const surface = ugScore !== null || ugRisksArr.length > 0 || ugDomainsRaw.length > 0 ? {
+    score:       ugScoreDisplay ?? 0,
+    grade:       ugGrade ?? "N/A",
+    findings:    ugRisksArr.map(r => ({
       severity: r.severity
         ? r.severity.charAt(0).toUpperCase() + r.severity.slice(1)
         : "Medium",
@@ -357,10 +410,15 @@ function transformSnapshot(snap) {
         ? new Date(r.firstDetected).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})
         : "—",
     })),
-    domains:    ugDomains.length || null,
-    subdomains: null,
-    openPorts:  null,
-    ipRanges:   null,
+    // Counts for summary cards
+    domainCount:   ugDomainsRaw.length || null,
+    ipCount:       ugIpsRaw.length || null,
+    openPortCount: ugAllOpenPorts.size || null,
+    certCount:     ugCertsList.length || null,
+    // Detailed lists for tabs
+    domainsList:   ugDomainsList,
+    ipsList:       ugIpsList,
+    certsList:     ugCertsList,
   } : null;
 
   // ── Azure (flatten secureScore to a number) ──────────────────────────────
@@ -2154,56 +2212,413 @@ function FirewallPage({ data }) {
 
 
 // ── Attack Surface ───────────────────────────────────────────────────────────
+// ── Attack Surface helpers ────────────────────────────────────────────────────
+function ExpiryBadge({ daysToExp, status }) {
+  const cfg = {
+    expired:  { bg:"#fef2f2", color:C.critical, label:"Expired" },
+    critical: { bg:"#fef2f2", color:C.critical, label:`${daysToExp}d` },
+    warning:  { bg:"#fffbeb", color:C.warn,     label:`${daysToExp}d` },
+    ok:       { bg:"#f0fdf4", color:C.ok,        label:`${daysToExp}d` },
+    unknown:  { bg:"#f8fafc", color:C.muted,     label:"Unknown" },
+  }[status || "unknown"];
+  return (
+    <span style={{ background:cfg.bg, color:cfg.color, padding:"2px 8px", borderRadius:10, fontSize:11, fontWeight:700 }}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function GradeChip({ grade }) {
+  if (!grade) return <span style={{ color:C.muted }}>—</span>;
+  const color = grade.startsWith("A") ? C.ok : grade.startsWith("B") ? "#2563eb" : grade.startsWith("C") ? C.warn : C.critical;
+  return (
+    <span style={{ background:color+"20", color, padding:"2px 8px", borderRadius:6, fontWeight:800, fontSize:12 }}>{grade}</span>
+  );
+}
+
+function ScoreBar({ score }) {
+  if (score == null) return <span style={{ color:C.muted, fontSize:12 }}>—</span>;
+  const color = score >= 80 ? C.ok : score >= 60 ? "#2563eb" : score >= 40 ? C.warn : C.critical;
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+      <div style={{ flex:1, background:"#e5e7eb", borderRadius:4, height:6 }}>
+        <div style={{ width:`${score}%`, background:color, borderRadius:4, height:6 }} />
+      </div>
+      <span style={{ fontSize:12, fontWeight:700, color, minWidth:28 }}>{score}</span>
+    </div>
+  );
+}
+
+function PortTag({ port, service }) {
+  const risky = [21,22,23,25,445,3389,8080,8443,3306,5432,27017,6379].includes(port);
+  return (
+    <span style={{ background:risky?"#fef2f2":"#f1f5f9", color:risky?C.critical:C.muted, padding:"2px 7px", borderRadius:8, fontSize:11, fontWeight:600, marginRight:4, marginBottom:4, display:"inline-block" }}>
+      {port}{service && service !== "—" ? `/${service}` : ""}
+    </span>
+  );
+}
+
+const ATTACK_SURFACE_TABS = [
+  { id:"overview",   label:"Overview",        icon:"📊" },
+  { id:"domains",    label:"Domains",         icon:"🌐" },
+  { id:"ips",        label:"IP Addresses",    icon:"📡" },
+  { id:"certs",      label:"SSL Certificates",icon:"🔒" },
+  { id:"expiry",     label:"Domain Expiry",   icon:"📅" },
+];
+
 function AttackSurfacePage({ data }) {
   const d = data || {};
   if (!d._hasData) return <NoData icon="🌐" title="No attack surface data yet" message="Connect UpGuard in ⚙️ Settings to see your external attack surface data." />;
   const s = d.surface;
+  const [tab, setTab] = useState("overview");
+  const [riskFilter, setRiskFilter] = useState("All");
+  const [domainSearch, setDomainSearch] = useState("");
+  const [ipSearch, setIpSearch] = useState("");
+  const [expandedIp, setExpandedIp] = useState(null);
+
   const gradeColor = !s?.grade ? C.muted
-    : s.grade.startsWith("A") ? C.ok : s.grade.startsWith("B") ? C.ok : s.grade.startsWith("C") ? C.warn : C.critical;
+    : s.grade.startsWith("A") ? C.ok : s.grade.startsWith("B") ? "#2563eb" : s.grade.startsWith("C") ? C.warn : C.critical;
+
+  // Risk severity breakdown counts
+  const sevCount = { Critical:0, High:0, Medium:0, Low:0 };
+  (s?.findings||[]).forEach(f => { if (sevCount[f.severity] !== undefined) sevCount[f.severity]++; else sevCount.Low++; });
+
+  const filteredFindings = (s?.findings||[]).filter(f => riskFilter === "All" || f.severity === riskFilter);
+  const filteredDomains  = (s?.domainsList||[]).filter(d => !domainSearch || d.hostname.toLowerCase().includes(domainSearch.toLowerCase()));
+  const filteredIps      = (s?.ipsList||[]).filter(i => !ipSearch || i.ip.includes(ipSearch));
+
+  const inputStyle = { background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", fontSize:12, color:C.text, outline:"none", width:220 };
+
   return (
     <div>
-      <SectionTitle title="Attack Surface – UpGuard" subtitle="External exposure monitoring, risk findings and brand protection" />
-      <div style={{ display:"grid", gridTemplateColumns:"200px 1fr", gap:16, marginBottom:24 }}>
-        <Card style={{ padding:24, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
-          <div style={{ fontSize:72, fontWeight:900, color:gradeColor, lineHeight:1 }}>{s?.grade||"—"}</div>
-          <div style={{ fontSize:14, color:C.muted, marginTop:8 }}>Security Grade</div>
-          <div style={{ fontSize:28, fontWeight:800, color:C.text, marginTop:4 }}>{s?.score != null ? `${s.score}/100` : "—"}</div>
+      <SectionTitle title="Attack Surface – UpGuard" subtitle="External exposure monitoring, domains, IPs, certificates and risk findings" />
+
+      {/* ── Summary Strip ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"180px repeat(5,1fr)", gap:12, marginBottom:20 }}>
+        {/* Grade card */}
+        <Card style={{ padding:20, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", background:`linear-gradient(135deg, ${gradeColor}15, ${gradeColor}05)`, border:`2px solid ${gradeColor}30` }}>
+          <div style={{ fontSize:56, fontWeight:900, color:gradeColor, lineHeight:1 }}>{s?.grade||"—"}</div>
+          <div style={{ fontSize:11, color:C.muted, marginTop:6, textAlign:"center" }}>Security Grade</div>
+          <div style={{ fontSize:22, fontWeight:800, color:C.text, marginTop:4 }}>{s?.score != null ? `${s.score}/100` : "—"}</div>
         </Card>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
-          {[
-            {icon:"🌐",label:"Domains",value:s?.domains},
-            {icon:"🔗",label:"Subdomains",value:s?.subdomains},
-            {icon:"🔌",label:"Open Ports",value:s?.openPorts},
-            {icon:"📡",label:"IP Ranges",value:s?.ipRanges},
-          ].map(m=>(
-            <Card key={m.label} style={{ padding:16, textAlign:"center" }}>
-              <div style={{ fontSize:24 }}>{m.icon}</div>
-              <div style={{ fontSize:24, fontWeight:800, color:m.value!=null?C.text:C.muted, marginTop:4 }}>
-                {m.value != null ? m.value : "—"}
-              </div>
-              <div style={{ fontSize:11, color:C.muted }}>{m.label}</div>
-            </Card>
-          ))}
-        </div>
+        {/* Metric cards */}
+        {[
+          { icon:"🌐", label:"Domains",       value:s?.domainCount,   tab:"domains", warn: s?.domainsList?.some(d=>d.status==="critical"||d.status==="expired") },
+          { icon:"📡", label:"IP Addresses",  value:s?.ipCount,       tab:"ips",     warn: false },
+          { icon:"🔌", label:"Open Ports",    value:s?.openPortCount, tab:"ips",     warn: (s?.openPortCount||0) > 10 },
+          { icon:"🔒", label:"Certificates",  value:s?.certCount,     tab:"certs",   warn: s?.certsList?.some(c=>c.status==="critical"||c.status==="expired") },
+          { icon:"⚠️", label:"Risk Findings", value:s?.findings?.length||null, tab:"overview", warn: (sevCount.Critical||0)+(sevCount.High||0) > 0 },
+        ].map(m => (
+          <Card key={m.label} style={{ padding:16, cursor:"pointer", border: m.warn ? `2px solid ${C.warn}` : `1px solid ${C.border}` }}
+                onClick={()=>setTab(m.tab)}>
+            <div style={{ fontSize:22 }}>{m.icon}</div>
+            <div style={{ fontSize:26, fontWeight:800, color: m.value!=null ? (m.warn ? C.warn : C.text) : C.muted, marginTop:4 }}>
+              {m.value ?? "—"}
+            </div>
+            <div style={{ fontSize:11, color:C.muted }}>{m.label}</div>
+            {m.warn && <div style={{ fontSize:10, color:C.warn, marginTop:2 }}>⚠ Action needed</div>}
+          </Card>
+        ))}
       </div>
-      <Card style={{ padding:20 }}>
-        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>External Risk Findings</div>
-        <table style={{ width:"100%", borderCollapse:"collapse" }}>
-          <thead><tr style={{ background:"#f8fafc" }}>
-            {["Severity","Finding","Asset / Domain","First Detected"].map(h=>(
-              <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
-            ))}
-          </tr></thead>
-          <tbody>{s?.findings?.map((f,i)=>(
-            <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
-              <td style={{ padding:"12px 12px" }}><SeverityBadge level={f.severity}/></td>
-              <td style={{ padding:"12px 12px", fontSize:13, color:C.text }}>{f.title}</td>
-              <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:12, color:C.muted }}>{f.asset}</td>
-              <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{f.first}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </Card>
+
+      {/* ── Tabs ── */}
+      <div style={{ display:"flex", gap:4, marginBottom:16 }}>
+        {ATTACK_SURFACE_TABS.map(t => (
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{
+            padding:"8px 16px", borderRadius:8, border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
+            background: tab===t.id ? C.primary : "#f1f5f9",
+            color:      tab===t.id ? "#fff" : C.muted,
+          }}>{t.icon} {t.label}</button>
+        ))}
+      </div>
+
+      {/* ═══ OVERVIEW TAB ═══ */}
+      {tab === "overview" && (
+        <div style={{ display:"grid", gridTemplateColumns:"300px 1fr", gap:16 }}>
+          {/* Severity donut / breakdown */}
+          <Card style={{ padding:20 }}>
+            <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Risk Breakdown by Severity</div>
+            {[
+              { sev:"Critical", color:C.critical, icon:"🔴" },
+              { sev:"High",     color:C.high,     icon:"🟠" },
+              { sev:"Medium",   color:C.warn,     icon:"🟡" },
+              { sev:"Low",      color:"#6b7280",  icon:"⚪" },
+            ].map(({sev,color,icon}) => {
+              const cnt = sevCount[sev] || 0;
+              const pct = s?.findings?.length ? Math.round(cnt/s.findings.length*100) : 0;
+              return (
+                <div key={sev} style={{ marginBottom:12 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                    <span style={{ fontSize:12, color:C.text, fontWeight:600 }}>{icon} {sev}</span>
+                    <span style={{ fontSize:12, fontWeight:700, color }}>{cnt}</span>
+                  </div>
+                  <div style={{ background:"#e5e7eb", borderRadius:4, height:8 }}>
+                    <div style={{ width:`${pct}%`, background:color, borderRadius:4, height:8 }} />
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ marginTop:16, padding:"10px 12px", background:"#f8fafc", borderRadius:8, fontSize:12, color:C.muted, textAlign:"center" }}>
+              {s?.findings?.length || 0} total findings
+            </div>
+          </Card>
+
+          {/* Risk findings table */}
+          <Card style={{ padding:20 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+              <div style={{ fontSize:14, fontWeight:700, color:C.text }}>External Risk Findings</div>
+              <div style={{ display:"flex", gap:6 }}>
+                {["All","Critical","High","Medium","Low"].map(sev => (
+                  <button key={sev} onClick={()=>setRiskFilter(sev)} style={{
+                    padding:"4px 10px", borderRadius:6, border:"none", cursor:"pointer", fontSize:11, fontWeight:600,
+                    background: riskFilter===sev ? C.primary : "#f1f5f9",
+                    color:      riskFilter===sev ? "#fff" : C.muted,
+                  }}>{sev}</button>
+                ))}
+              </div>
+            </div>
+            {filteredFindings.length === 0 ? (
+              <div style={{ textAlign:"center", padding:40, color:C.muted, fontSize:13 }}>
+                {riskFilter === "All" ? "✅ No risk findings" : `No ${riskFilter} findings`}
+              </div>
+            ) : (
+              <div style={{ overflowX:"auto" }}>
+                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                  <thead><tr style={{ background:"#f8fafc" }}>
+                    {["Severity","Finding","Asset / Domain","First Detected"].map(h=>(
+                      <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>{filteredFindings.map((f,i)=>(
+                    <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                      <td style={{ padding:"10px 12px" }}><SeverityBadge level={f.severity}/></td>
+                      <td style={{ padding:"10px 12px", fontSize:13, color:C.text }}>{f.title}</td>
+                      <td style={{ padding:"10px 12px", fontFamily:"monospace", fontSize:12, color:C.muted }}>{f.asset}</td>
+                      <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{f.first}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* ═══ DOMAINS TAB ═══ */}
+      {tab === "domains" && (
+        <Card style={{ padding:20 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+            <div style={{ fontSize:14, fontWeight:700, color:C.text }}>Monitored Domains</div>
+            <input placeholder="Search domain…" value={domainSearch} onChange={e=>setDomainSearch(e.target.value)} style={inputStyle} />
+          </div>
+          {filteredDomains.length === 0 ? (
+            <div style={{ textAlign:"center", padding:48, color:C.muted, fontSize:13 }}>
+              {(s?.domainsList||[]).length === 0
+                ? "No domains found in UpGuard response. Ensure domains are registered in your UpGuard account."
+                : "No domains match search."}
+            </div>
+          ) : (
+            <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <thead><tr style={{ background:"#f8fafc" }}>
+                {["Domain","Score","Grade","IP Addresses","Expiry","Status"].map(h=>(
+                  <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>{filteredDomains.map((dom,i)=>(
+                <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                  <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:13, fontWeight:600, color:C.text }}>{dom.hostname}</td>
+                  <td style={{ padding:"12px 12px", minWidth:120 }}><ScoreBar score={dom.score}/></td>
+                  <td style={{ padding:"12px 12px" }}><GradeChip grade={dom.grade}/></td>
+                  <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>
+                    {dom.ips.length > 0 ? (
+                      <span style={{ fontFamily:"monospace" }}>{dom.ips.slice(0,2).join(", ")}{dom.ips.length>2?` +${dom.ips.length-2}`:""}</span>
+                    ) : "—"}
+                  </td>
+                  <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{dom.expiry}</td>
+                  <td style={{ padding:"12px 12px" }}><ExpiryBadge daysToExp={dom.daysToExp} status={dom.status}/></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </Card>
+      )}
+
+      {/* ═══ IP ADDRESSES TAB ═══ */}
+      {tab === "ips" && (
+        <Card style={{ padding:20 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+            <div>
+              <div style={{ fontSize:14, fontWeight:700, color:C.text }}>IP Address Inventory</div>
+              <div style={{ fontSize:12, color:C.muted, marginTop:2 }}>Click a row to expand open ports</div>
+            </div>
+            <input placeholder="Search IP…" value={ipSearch} onChange={e=>setIpSearch(e.target.value)} style={inputStyle} />
+          </div>
+          {filteredIps.length === 0 ? (
+            <div style={{ textAlign:"center", padding:48, color:C.muted, fontSize:13 }}>
+              {(s?.ipsList||[]).length === 0
+                ? "No IP data found. UpGuard /ips endpoint requires appropriate subscription."
+                : "No IPs match search."}
+            </div>
+          ) : (
+            <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <thead><tr style={{ background:"#f8fafc" }}>
+                {["IP Address","Score","Open Ports","Risk"].map(h=>(
+                  <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>{filteredIps.map((ip,i)=>{
+                const isExpanded = expandedIp === i;
+                const riskyPorts = ip.openPorts.filter(p=>[21,22,23,25,445,3389,8080,3306,5432,27017,6379].includes(p.port));
+                return (
+                  <React.Fragment key={i}>
+                    <tr style={{ borderBottom:`1px solid ${C.border}`, cursor:"pointer", background:isExpanded?"#f8fafc":"#fff" }}
+                        onClick={()=>setExpandedIp(isExpanded?null:i)}>
+                      <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:13, fontWeight:600, color:C.text }}>
+                        {isExpanded?"▼":"▶"} {ip.ip}
+                      </td>
+                      <td style={{ padding:"12px 12px", minWidth:120 }}><ScoreBar score={ip.score}/></td>
+                      <td style={{ padding:"12px 12px", fontSize:13, color:C.text }}>{ip.openPorts.length}</td>
+                      <td style={{ padding:"12px 12px" }}>
+                        {riskyPorts.length > 0
+                          ? <span style={{ background:"#fef2f2", color:C.critical, padding:"2px 8px", borderRadius:8, fontSize:11, fontWeight:700 }}>⚠ {riskyPorts.length} risky</span>
+                          : <span style={{ background:"#f0fdf4", color:C.ok, padding:"2px 8px", borderRadius:8, fontSize:11, fontWeight:700 }}>✓ Clean</span>}
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr style={{ borderBottom:`1px solid ${C.border}` }}>
+                        <td colSpan={4} style={{ padding:"12px 16px 16px", background:"#f8fafc" }}>
+                          <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:8 }}>OPEN PORTS ON {ip.ip}</div>
+                          {ip.openPorts.length === 0
+                            ? <span style={{ fontSize:12, color:C.muted }}>No open ports reported</span>
+                            : <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+                                {ip.openPorts.map((p,j)=><PortTag key={j} port={p.port} service={p.service}/>)}
+                              </div>}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}</tbody>
+            </table>
+          )}
+        </Card>
+      )}
+
+      {/* ═══ SSL CERTIFICATES TAB ═══ */}
+      {tab === "certs" && (
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>SSL Certificate Status</div>
+          {(s?.certsList||[]).length === 0 ? (
+            <div style={{ textAlign:"center", padding:48 }}>
+              <div style={{ fontSize:48, marginBottom:12 }}>🔒</div>
+              <div style={{ fontSize:14, color:C.muted, fontWeight:600 }}>No certificate data available</div>
+              <div style={{ fontSize:12, color:C.muted, marginTop:8 }}>
+                UpGuard returns SSL certificate details when they are associated with monitored domains.<br/>
+                Ensure your domains are correctly added and monitored in your UpGuard account.
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Expiry summary */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:20 }}>
+                {[
+                  { label:"Expired",    color:C.critical, certs:(s.certsList||[]).filter(c=>c.status==="expired") },
+                  { label:"< 14 days",  color:C.critical, certs:(s.certsList||[]).filter(c=>c.status==="critical") },
+                  { label:"< 30 days",  color:C.warn,     certs:(s.certsList||[]).filter(c=>c.status==="warning") },
+                  { label:"Valid",      color:C.ok,       certs:(s.certsList||[]).filter(c=>c.status==="ok") },
+                ].map(g=>(
+                  <div key={g.label} style={{ padding:14, background:g.color+"10", borderRadius:10, border:`1px solid ${g.color}30`, textAlign:"center" }}>
+                    <div style={{ fontSize:22, fontWeight:800, color:g.color }}>{g.certs.length}</div>
+                    <div style={{ fontSize:11, color:C.muted }}>{g.label}</div>
+                  </div>
+                ))}
+              </div>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr style={{ background:"#f8fafc" }}>
+                  {["Domain","Subject / CN","Issuer","Valid From","Expires","Days Left"].map(h=>(
+                    <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{(s.certsList||[]).sort((a,b)=>(a.daysToExp??999)-(b.daysToExp??999)).map((c,i)=>(
+                  <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                    <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:12, color:C.text }}>{c.domain}</td>
+                    <td style={{ padding:"12px 12px", fontSize:12, color:C.text }}>{c.subject}</td>
+                    <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{c.issuer}</td>
+                    <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{c.validFrom}</td>
+                    <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{c.validTo}</td>
+                    <td style={{ padding:"12px 12px" }}><ExpiryBadge daysToExp={c.daysToExp} status={c.status}/></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </>
+          )}
+        </Card>
+      )}
+
+      {/* ═══ DOMAIN EXPIRY TAB ═══ */}
+      {tab === "expiry" && (
+        <div>
+          {/* Expiry urgency buckets */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:16 }}>
+            {[
+              { label:"Expired",     color:C.critical, filter:d=>d.status==="expired" },
+              { label:"< 30 days",   color:C.critical, filter:d=>d.status==="critical" },
+              { label:"< 90 days",   color:C.warn,     filter:d=>d.status==="warning" },
+              { label:"Safe",        color:C.ok,       filter:d=>d.status==="ok" },
+            ].map(g => {
+              const cnt = (s?.domainsList||[]).filter(g.filter).length;
+              return (
+                <Card key={g.label} style={{ padding:16, textAlign:"center", border:`2px solid ${g.color}30`, background:g.color+"08" }}>
+                  <div style={{ fontSize:28, fontWeight:800, color:g.color }}>{cnt}</div>
+                  <div style={{ fontSize:11, color:C.muted }}>{g.label}</div>
+                </Card>
+              );
+            })}
+          </div>
+
+          <Card style={{ padding:20 }}>
+            <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Domain Registration Expiry</div>
+            {(s?.domainsList||[]).length === 0 ? (
+              <div style={{ textAlign:"center", padding:48 }}>
+                <div style={{ fontSize:48, marginBottom:12 }}>📅</div>
+                <div style={{ fontSize:14, color:C.muted, fontWeight:600 }}>No domain expiry data available</div>
+                <div style={{ fontSize:12, color:C.muted, marginTop:8 }}>
+                  Domain registration expiry dates are provided by UpGuard when available.<br/>
+                  Some domains may show "Unknown" if WHOIS data is restricted.
+                </div>
+              </div>
+            ) : (
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr style={{ background:"#f8fafc" }}>
+                  {["Domain","Security Score","Grade","Expiry Date","Days Remaining","Status"].map(h=>(
+                    <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{[...(s?.domainsList||[])]
+                  .sort((a,b) => {
+                    if (a.status==="expired" && b.status!=="expired") return -1;
+                    if (b.status==="expired" && a.status!=="expired") return  1;
+                    return (a.daysToExp??99999) - (b.daysToExp??99999);
+                  })
+                  .map((dom,i) => (
+                    <tr key={i} style={{ borderBottom:`1px solid ${C.border}`, background: dom.status==="expired"||dom.status==="critical" ? "#fef2f208" : "#fff" }}>
+                      <td style={{ padding:"12px 12px", fontFamily:"monospace", fontSize:13, fontWeight:600, color:C.text }}>{dom.hostname}</td>
+                      <td style={{ padding:"12px 12px", minWidth:120 }}><ScoreBar score={dom.score}/></td>
+                      <td style={{ padding:"12px 12px" }}><GradeChip grade={dom.grade}/></td>
+                      <td style={{ padding:"12px 12px", fontSize:12, color:C.muted }}>{dom.expiry}</td>
+                      <td style={{ padding:"12px 12px", fontSize:13, fontWeight:700, color:
+                        dom.status==="expired"||dom.status==="critical" ? C.critical : dom.status==="warning" ? C.warn : dom.status==="ok" ? C.ok : C.muted }}>
+                        {dom.daysToExp != null ? (dom.daysToExp < 0 ? "Expired" : `${dom.daysToExp} days`) : "Unknown"}
+                      </td>
+                      <td style={{ padding:"12px 12px" }}><ExpiryBadge daysToExp={dom.daysToExp} status={dom.status}/></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
