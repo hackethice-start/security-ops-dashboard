@@ -481,6 +481,9 @@ const TOOLS = [
   { key:"qualys",       name:"Qualys VMDR",     icon:"🔍", cat:"Vulnerability Mgmt",color:"#ec4899" },
   { key:"manageengine", name:"ManageEngine",    icon:"💻", cat:"Asset Management",  color:"#14b8a6" },
   { key:"taegis",       name:"Taegis XDR",      icon:"🎯", cat:"SIEM / XDR",        color:"#f59e0b" },
+  { key:"kali",         name:"Kali Linux",      icon:"🐉", cat:"Vuln Assessment",   color:"#dc2626" },
+  { key:"nessus",       name:"Nessus",          icon:"🔬", cat:"Vuln Assessment",   color:"#8b5cf6" },
+  { key:"zaproxy",      name:"OWASP ZAProxy",   icon:"🕷️", cat:"Vuln Assessment",   color:"#f59e0b" },
 ];
 
 const INTERVALS = [
@@ -2623,6 +2626,707 @@ function AttackSurfacePage({ data }) {
   );
 }
 
+// ── GRC & Compliance ─────────────────────────────────────────────────────────
+const GRC_FRAMEWORKS = [
+  { id:"dpdpa",    label:"DPDPA 2023",        flag:"🇮🇳", color:"#f59e0b", desc:"Digital Personal Data Protection Act (India)" },
+  { id:"pcidss",   label:"PCI DSS 4.0.1",     flag:"💳", color:"#3b82f6", desc:"Payment Card Industry Data Security Standard" },
+  { id:"iso27001", label:"ISO 27001:2022",     flag:"🌍", color:"#10b981", desc:"Information Security Management System" },
+];
+
+const GRC_STATUS_CFG = {
+  "compliant":     { label:"Compliant",     color:"#16a34a", bg:"#f0fdf4" },
+  "partial":       { label:"Partial",       color:"#d97706", bg:"#fffbeb" },
+  "non-compliant": { label:"Non-Compliant", color:"#dc2626", bg:"#fef2f2" },
+  "not-assessed":  { label:"Not Assessed",  color:"#6b7280", bg:"#f8fafc" },
+  "na":            { label:"N/A",           color:"#9ca3af", bg:"#f8fafc" },
+};
+
+function GRCStatusBadge({ status }) {
+  const cfg = GRC_STATUS_CFG[status] || GRC_STATUS_CFG["not-assessed"];
+  return (
+    <span style={{ background:cfg.bg, color:cfg.color, padding:"3px 10px", borderRadius:10, fontSize:11, fontWeight:700 }}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function GRCEditModal({ control, onSave, onClose }) {
+  const [status, setStatus]   = React.useState(control.status || "not-assessed");
+  const [evidence, setEvidence] = React.useState(control.evidence || "");
+  const [notes, setNotes]     = React.useState(control.notes || "");
+  const [owner, setOwner]     = React.useState(control.owner || "");
+  const [dueDate, setDueDate] = React.useState(control.due_date ? control.due_date.slice(0,10) : "");
+  const [saving, setSaving]   = React.useState(false);
+
+  const inputStyle = { width:"100%", background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 12px", fontSize:13, color:C.text, outline:"none", boxSizing:"border-box" };
+
+  async function save() {
+    setSaving(true);
+    await onSave({ status, evidence, notes, owner, due_date: dueDate || null });
+    setSaving(false);
+  }
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div style={{ background:"#fff", borderRadius:16, padding:32, width:520, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 25px 50px rgba(0,0,0,0.3)" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:20 }}>
+          <div>
+            <div style={{ fontSize:11, color:C.muted, fontWeight:600 }}>{control.control_id}</div>
+            <div style={{ fontSize:16, fontWeight:800, color:C.text, marginTop:2 }}>{control.title}</div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", fontSize:20, cursor:"pointer", color:C.muted }}>✕</button>
+        </div>
+        <div style={{ background:"#f8fafc", borderRadius:8, padding:12, fontSize:12, color:C.muted, marginBottom:20, lineHeight:1.6 }}>{control.description}</div>
+        <div style={{ display:"grid", gap:14 }}>
+          <div>
+            <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:6 }}>Compliance Status</div>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {Object.entries(GRC_STATUS_CFG).map(([val, cfg]) => (
+                <button key={val} onClick={()=>setStatus(val)} style={{
+                  padding:"6px 14px", borderRadius:8, border:`2px solid ${status===val ? cfg.color : C.border}`,
+                  background: status===val ? cfg.bg : "#fff", color: status===val ? cfg.color : C.muted,
+                  cursor:"pointer", fontSize:12, fontWeight:600
+                }}>{cfg.label}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:6 }}>Evidence / Reference</div>
+            <input value={evidence} onChange={e=>setEvidence(e.target.value)} placeholder="Policy ref, doc link, ticket ID…" style={inputStyle}/>
+          </div>
+          <div>
+            <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:6 }}>Notes</div>
+            <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="Gap description, action items…" style={{ ...inputStyle, resize:"vertical" }}/>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            <div>
+              <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:6 }}>Control Owner</div>
+              <input value={owner} onChange={e=>setOwner(e.target.value)} placeholder="Name / team" style={inputStyle}/>
+            </div>
+            <div>
+              <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:6 }}>Due Date</div>
+              <input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)} style={inputStyle}/>
+            </div>
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:10, justifyContent:"flex-end", marginTop:24 }}>
+          <button onClick={onClose} style={{ padding:"9px 20px", borderRadius:8, border:`1px solid ${C.border}`, background:"#fff", color:C.muted, cursor:"pointer", fontWeight:600 }}>Cancel</button>
+          <button onClick={save} disabled={saving} style={{ padding:"9px 20px", borderRadius:8, border:"none", background:C.primary, color:"#fff", cursor:"pointer", fontWeight:700 }}>
+            {saving ? "Saving…" : "Save Control"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GRCPage() {
+  const [framework, setFramework]   = React.useState("dpdpa");
+  const [controls, setControls]     = React.useState([]);
+  const [loading, setLoading]       = React.useState(false);
+  const [editCtrl, setEditCtrl]     = React.useState(null);
+  const [filterStatus, setFilterStatus] = React.useState("all");
+  const [filterCat, setFilterCat]   = React.useState("all");
+  const [search, setSearch]         = React.useState("");
+  const [saving, setSaving]         = React.useState(false);
+
+  const fw = GRC_FRAMEWORKS.find(f => f.id === framework) || GRC_FRAMEWORKS[0];
+
+  async function fetchControls(fw) {
+    setLoading(true);
+    try {
+      const r = await apiFetch(`${API}/api/grc/${fw}`);
+      const data = await r.json();
+      setControls(Array.isArray(data) ? data : []);
+    } catch(e) { setControls([]); }
+    setLoading(false);
+  }
+
+  React.useEffect(() => { fetchControls(framework); }, [framework]);
+
+  async function saveControl(ctrl, updates) {
+    setSaving(true);
+    try {
+      await apiFetch(`${API}/api/grc/${framework}/${ctrl.control_id}`, { method:"PUT", body: JSON.stringify(updates) });
+      setControls(prev => prev.map(c => c.control_id === ctrl.control_id ? { ...c, ...updates, updated_at: new Date().toISOString() } : c));
+    } catch(e) { alert("Save failed: " + e.message); }
+    setEditCtrl(null);
+    setSaving(false);
+  }
+
+  // Compliance score
+  const assessed  = controls.filter(c => c.status !== "not-assessed" && c.status !== "na");
+  const compliant = controls.filter(c => c.status === "compliant");
+  const partial   = controls.filter(c => c.status === "partial");
+  const nonComp   = controls.filter(c => c.status === "non-compliant");
+  const score     = controls.length ? Math.round((compliant.length + partial.length * 0.5) / controls.length * 100) : 0;
+  const scoreColor = score >= 80 ? C.ok : score >= 60 ? "#2563eb" : score >= 40 ? C.warn : C.critical;
+
+  // Filter + search
+  const categories = ["all", ...new Set(controls.map(c => c.category))];
+  const filtered = controls.filter(c => {
+    if (filterStatus !== "all" && c.status !== filterStatus) return false;
+    if (filterCat !== "all" && c.category !== filterCat) return false;
+    if (search && !c.title.toLowerCase().includes(search.toLowerCase()) && !c.control_id.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const inputStyle = { background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", fontSize:12, color:C.text, outline:"none" };
+
+  return (
+    <div>
+      <SectionTitle title="GRC & Compliance Management" subtitle="Governance, Risk and Compliance — track controls across DPDPA, PCI DSS 4.0.1, and ISO 27001:2022" />
+
+      {/* Framework tabs */}
+      <div style={{ display:"flex", gap:12, marginBottom:20 }}>
+        {GRC_FRAMEWORKS.map(f => (
+          <button key={f.id} onClick={() => { setFramework(f.id); setFilterStatus("all"); setFilterCat("all"); setSearch(""); }}
+            style={{ flex:1, padding:"14px 20px", borderRadius:12, border:`2px solid ${framework===f.id ? f.color : C.border}`,
+              background: framework===f.id ? f.color+"12" : "#fff", cursor:"pointer", textAlign:"left",
+              boxShadow: framework===f.id ? `0 0 0 2px ${f.color}40` : "none" }}>
+            <div style={{ fontSize:20 }}>{f.flag}</div>
+            <div style={{ fontSize:14, fontWeight:800, color: framework===f.id ? f.color : C.text, marginTop:4 }}>{f.label}</div>
+            <div style={{ fontSize:11, color:C.muted }}>{f.desc}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Score + summary strip */}
+      <div style={{ display:"grid", gridTemplateColumns:"200px repeat(4,1fr)", gap:12, marginBottom:20 }}>
+        <Card style={{ padding:20, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+          background:`linear-gradient(135deg,${scoreColor}15,${scoreColor}05)`, border:`2px solid ${scoreColor}30` }}>
+          <div style={{ fontSize:48, fontWeight:900, color:scoreColor }}>{score}%</div>
+          <div style={{ fontSize:11, color:C.muted, textAlign:"center", marginTop:4 }}>Compliance Score</div>
+          <div style={{ fontSize:11, color:C.muted }}>{assessed.length}/{controls.length} assessed</div>
+        </Card>
+        {[
+          { label:"Compliant",     value:compliant.length, color:C.ok,       icon:"✅" },
+          { label:"Partial",       value:partial.length,   color:C.warn,     icon:"⚠️" },
+          { label:"Non-Compliant", value:nonComp.length,   color:C.critical, icon:"❌" },
+          { label:"Not Assessed",  value:controls.length - assessed.length - controls.filter(c=>c.status==="na").length, color:C.muted, icon:"⬜" },
+        ].map(m => (
+          <Card key={m.label} style={{ padding:16, textAlign:"center", cursor:"pointer",
+            border: (m.label==="Non-Compliant" && m.value>0) ? `2px solid ${C.critical}` : `1px solid ${C.border}` }}
+            onClick={() => setFilterStatus(m.label.toLowerCase().replace(" ","-"))}>
+            <div style={{ fontSize:22 }}>{m.icon}</div>
+            <div style={{ fontSize:28, fontWeight:800, color:m.value>0 ? m.color : C.muted }}>{m.value}</div>
+            <div style={{ fontSize:11, color:C.muted }}>{m.label}</div>
+          </Card>
+        ))}
+      </div>
+
+      {/* Filters + search */}
+      <Card style={{ padding:16, marginBottom:16 }}>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center" }}>
+          <input placeholder="Search controls…" value={search} onChange={e=>setSearch(e.target.value)} style={{ ...inputStyle, width:220 }}/>
+          <select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)} style={{ ...inputStyle, cursor:"pointer" }}>
+            <option value="all">All Statuses</option>
+            {Object.entries(GRC_STATUS_CFG).map(([v,c])=><option key={v} value={v}>{c.label}</option>)}
+          </select>
+          <select value={filterCat} onChange={e=>setFilterCat(e.target.value)} style={{ ...inputStyle, cursor:"pointer", maxWidth:280 }}>
+            {categories.map(cat => <option key={cat} value={cat}>{cat === "all" ? "All Categories" : cat}</option>)}
+          </select>
+          <div style={{ marginLeft:"auto", fontSize:12, color:C.muted }}>{filtered.length} controls</div>
+          <button onClick={()=>{ if(window.confirm("Reset all controls to Not Assessed?")) apiFetch(`${API}/api/grc/${framework}/reset`,{method:"POST"}).then(()=>fetchControls(framework)); }}
+            style={{ padding:"6px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"#fff", color:C.muted, cursor:"pointer", fontSize:12 }}>
+            Reset Framework
+          </button>
+        </div>
+      </Card>
+
+      {/* Controls table */}
+      <Card style={{ padding:0, overflow:"hidden" }}>
+        {loading ? (
+          <div style={{ textAlign:"center", padding:60, color:C.muted }}>Loading controls…</div>
+        ) : (
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ background:"#f8fafc" }}>
+                {["ID","Category","Control","Status","Owner","Due","Last Updated",""].map(h => (
+                  <th key={h} style={{ padding:"11px 14px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr><td colSpan={8} style={{ textAlign:"center", padding:48, color:C.muted, fontSize:13 }}>No controls match filters</td></tr>
+              ) : filtered.map((ctrl, i) => (
+                <tr key={ctrl.id} style={{ borderBottom:`1px solid ${C.border}`, background: i%2===0?"#fff":"#fafafa" }}>
+                  <td style={{ padding:"11px 14px", fontFamily:"monospace", fontSize:12, fontWeight:700, color:fw.color, whiteSpace:"nowrap" }}>{ctrl.control_id}</td>
+                  <td style={{ padding:"11px 14px", fontSize:11, color:C.muted, maxWidth:140 }}>{ctrl.category}</td>
+                  <td style={{ padding:"11px 14px" }}>
+                    <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{ctrl.title}</div>
+                    {ctrl.evidence && <div style={{ fontSize:11, color:"#2563eb", marginTop:2 }}>📎 {ctrl.evidence.slice(0,60)}</div>}
+                    {ctrl.notes   && <div style={{ fontSize:11, color:C.muted,   marginTop:2 }}>📝 {ctrl.notes.slice(0,80)}</div>}
+                  </td>
+                  <td style={{ padding:"11px 14px" }}><GRCStatusBadge status={ctrl.status}/></td>
+                  <td style={{ padding:"11px 14px", fontSize:12, color:C.muted }}>{ctrl.owner || "—"}</td>
+                  <td style={{ padding:"11px 14px", fontSize:12, color: ctrl.due_date && new Date(ctrl.due_date)<new Date() ? C.critical : C.muted, fontWeight: ctrl.due_date && new Date(ctrl.due_date)<new Date() ? 700 : 400 }}>
+                    {ctrl.due_date ? new Date(ctrl.due_date).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—"}
+                  </td>
+                  <td style={{ padding:"11px 14px", fontSize:11, color:C.muted }}>
+                    {ctrl.updated_at ? new Date(ctrl.updated_at).toLocaleDateString("en-GB",{day:"2-digit",month:"short"}) : "—"}
+                  </td>
+                  <td style={{ padding:"11px 14px" }}>
+                    <button onClick={()=>setEditCtrl(ctrl)} style={{ padding:"5px 12px", borderRadius:6, border:`1px solid ${fw.color}`, background:"#fff", color:fw.color, cursor:"pointer", fontSize:12, fontWeight:600 }}>Edit</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {editCtrl && (
+        <GRCEditModal
+          control={editCtrl}
+          onSave={(updates) => saveControl(editCtrl, updates)}
+          onClose={() => setEditCtrl(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Automated Vulnerability Assessment ───────────────────────────────────────
+const VULN_TOOLS = [
+  { id:"nmap",    label:"Nmap",    icon:"🗺️", color:"#3b82f6", desc:"Port & service discovery" },
+  { id:"zaproxy", label:"ZAProxy", icon:"🕷️", color:"#f59e0b", desc:"Web application scan (OWASP)" },
+  { id:"nessus",  label:"Nessus",  icon:"🔬", color:"#8b5cf6", desc:"Deep vulnerability scan" },
+  { id:"qualys",  label:"Qualys",  icon:"☁️", color:"#10b981", desc:"Cloud-based VMDR scan" },
+  { id:"kali",    label:"Kali",    icon:"🐉", color:"#dc2626", desc:"Custom Kali Linux scan" },
+];
+
+const SCAN_PROFILES = [
+  { id:"quick",    label:"Quick",    desc:"Top 100 ports, fast (~2 min)" },
+  { id:"standard", label:"Standard", desc:"Top 1000 ports + CVE checks (~10 min)" },
+  { id:"deep",     label:"Deep",     desc:"Full port range + scripts + OS (~30 min)" },
+];
+
+function SeverityCount({ results }) {
+  const counts = { Critical:0, High:0, Medium:0, Low:0, Info:0 };
+  if (results?.nmap?.ports) results.nmap.ports.filter(p=>p.state==="open").forEach(()=>counts.Info++);
+  if (results?.zaproxy?.alerts) results.zaproxy.alerts.forEach(a => { if(counts[a.risk]!==undefined) counts[a.risk]++; });
+  if (results?.nessus?.vulns) results.nessus.vulns.forEach(v => { if(counts[v.severity]!==undefined) counts[v.severity]++; });
+  return counts;
+}
+
+function VulnAssessmentPage() {
+  const [scans, setScans]             = React.useState([]);
+  const [selectedScan, setSelectedScan] = React.useState(null);
+  const [scanDetail, setScanDetail]   = React.useState(null);
+  const [loading, setLoading]         = React.useState(false);
+  const [loadingDetail, setLoadingDetail] = React.useState(false);
+  const [launching, setLaunching]     = React.useState(false);
+  const [target, setTarget]           = React.useState("");
+  const [profile, setProfile]         = React.useState("standard");
+  const [selectedTools, setSelectedTools] = React.useState(["nmap"]);
+  const [activeTab, setActiveTab]     = React.useState("overview");
+  const [pollTimer, setPollTimer]     = React.useState(null);
+
+  // Load scans list
+  async function fetchScans() {
+    setLoading(true);
+    try {
+      const r = await apiFetch(`${API}/api/vuln/scans`);
+      const data = await r.json();
+      setScans(Array.isArray(data) ? data : []);
+    } catch(e) {}
+    setLoading(false);
+  }
+
+  // Load full scan detail
+  async function fetchDetail(id) {
+    setLoadingDetail(true);
+    try {
+      const r = await apiFetch(`${API}/api/vuln/scan/${id}`);
+      const data = await r.json();
+      setScanDetail(data);
+    } catch(e) {}
+    setLoadingDetail(false);
+  }
+
+  React.useEffect(() => { fetchScans(); }, []);
+
+  React.useEffect(() => {
+    if (selectedScan) fetchDetail(selectedScan);
+  }, [selectedScan]);
+
+  // Poll running scans
+  React.useEffect(() => {
+    const running = scans.some(s => s.status === "queued" || s.status === "running");
+    if (running && !pollTimer) {
+      const t = setInterval(() => {
+        fetchScans();
+        if (selectedScan) fetchDetail(selectedScan);
+      }, 5000);
+      setPollTimer(t);
+    } else if (!running && pollTimer) {
+      clearInterval(pollTimer);
+      setPollTimer(null);
+    }
+    return () => {};
+  }, [scans, selectedScan]);
+
+  function toggleTool(id) {
+    setSelectedTools(prev => prev.includes(id) ? prev.filter(t=>t!==id) : [...prev, id]);
+  }
+
+  async function launchScan() {
+    if (!target.trim()) return alert("Please enter a target IP or domain.");
+    if (selectedTools.length === 0) return alert("Select at least one tool.");
+    setLaunching(true);
+    try {
+      const r = await apiFetch(`${API}/api/vuln/scan`, { method:"POST", body: JSON.stringify({ target:target.trim(), scan_type:profile, tools:selectedTools }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Launch failed");
+      await fetchScans();
+      setSelectedScan(d.job_id);
+      setActiveTab("overview");
+    } catch(e) { alert("Scan launch failed: " + e.message); }
+    setLaunching(false);
+  }
+
+  async function deleteScan(id) {
+    if (!window.confirm("Delete this scan?")) return;
+    await apiFetch(`${API}/api/vuln/scan/${id}`, { method:"DELETE" });
+    if (selectedScan === id) { setSelectedScan(null); setScanDetail(null); }
+    fetchScans();
+  }
+
+  function downloadReport(id) {
+    window.open(`${API}/api/vuln/scan/${id}/pdf?token=${document.cookie.match(/session=([^;]+)/)?.[1]||""}`, "_blank");
+  }
+
+  const statusColor = { queued:"#6b7280", running:"#3b82f6", completed:"#16a34a", failed:"#dc2626" };
+  const statusIcon  = { queued:"🕐", running:"⚡", completed:"✅", failed:"❌" };
+  const inputStyle  = { background:"#f8fafc", border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 12px", fontSize:13, color:C.text, outline:"none", width:"100%", boxSizing:"border-box" };
+
+  const detail = scanDetail;
+  const sevCounts = detail ? SeverityCount({ results: detail.results }) : null;
+
+  return (
+    <div>
+      <SectionTitle title="Automated Vulnerability Assessment" subtitle="Orchestrated security scanning with Kali, Nmap, ZAProxy, Nessus, Qualys + Claude AI analysis" />
+
+      <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:16 }}>
+        {/* ── Left: Launch Panel ── */}
+        <div>
+          <Card style={{ padding:20, marginBottom:16 }}>
+            <div style={{ fontSize:14, fontWeight:800, color:C.text, marginBottom:16 }}>🚀 New Scan</div>
+            <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:6 }}>Target</div>
+              <input value={target} onChange={e=>setTarget(e.target.value)} placeholder="192.168.1.1 or example.com" style={inputStyle}
+                onKeyDown={e => e.key==="Enter" && launchScan()}/>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:8 }}>Scan Profile</div>
+              {SCAN_PROFILES.map(p => (
+                <div key={p.id} onClick={()=>setProfile(p.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:8, marginBottom:6, cursor:"pointer",
+                  border:`2px solid ${profile===p.id ? C.primary : C.border}`, background: profile===p.id ? C.primary+"08" : "#fff" }}>
+                  <div style={{ width:14, height:14, borderRadius:"50%", border:`2px solid ${profile===p.id ? C.primary : C.border}`, background: profile===p.id ? C.primary : "#fff", flexShrink:0 }}/>
+                  <div>
+                    <div style={{ fontSize:13, fontWeight:700, color: profile===p.id ? C.primary : C.text }}>{p.label}</div>
+                    <div style={{ fontSize:11, color:C.muted }}>{p.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginBottom:16 }}>
+              <div style={{ fontSize:12, fontWeight:600, color:C.muted, marginBottom:8 }}>Tools</div>
+              {VULN_TOOLS.map(t => (
+                <div key={t.id} onClick={()=>toggleTool(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 10px", borderRadius:8, marginBottom:5, cursor:"pointer",
+                  border:`2px solid ${selectedTools.includes(t.id) ? t.color : C.border}`, background: selectedTools.includes(t.id) ? t.color+"10" : "#fff" }}>
+                  <div style={{ width:16, height:16, borderRadius:3, border:`2px solid ${selectedTools.includes(t.id) ? t.color : C.border}`,
+                    background: selectedTools.includes(t.id) ? t.color : "#fff", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                    {selectedTools.includes(t.id) && <span style={{ fontSize:10, color:"#fff" }}>✓</span>}
+                  </div>
+                  <span style={{ fontSize:14 }}>{t.icon}</span>
+                  <div>
+                    <div style={{ fontSize:12, fontWeight:700, color: selectedTools.includes(t.id) ? t.color : C.text }}>{t.label}</div>
+                    <div style={{ fontSize:10, color:C.muted }}>{t.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button onClick={launchScan} disabled={launching} style={{ width:"100%", padding:"11px", borderRadius:10, border:"none",
+              background: launching ? "#94a3b8" : C.primary, color:"#fff", cursor: launching ? "not-allowed" : "pointer", fontWeight:800, fontSize:14 }}>
+              {launching ? "Launching…" : "🚀 Launch Scan"}
+            </button>
+          </Card>
+
+          {/* Recent scans list */}
+          <Card style={{ padding:16 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+              <div style={{ fontSize:13, fontWeight:700, color:C.text }}>Recent Scans</div>
+              <button onClick={fetchScans} style={{ background:"none", border:"none", cursor:"pointer", fontSize:12, color:C.muted }}>↻ Refresh</button>
+            </div>
+            {scans.length === 0 ? (
+              <div style={{ textAlign:"center", padding:24, color:C.muted, fontSize:12 }}>No scans yet — launch your first scan above</div>
+            ) : scans.slice(0,15).map(s => (
+              <div key={s.id} onClick={() => { setSelectedScan(s.id); setActiveTab("overview"); }}
+                style={{ padding:"10px 12px", borderRadius:8, marginBottom:6, cursor:"pointer",
+                  border:`2px solid ${selectedScan===s.id ? C.primary : C.border}`,
+                  background: selectedScan===s.id ? C.primary+"08" : "#fff" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                  <div style={{ fontFamily:"monospace", fontSize:12, fontWeight:700, color:C.text }}>{s.target}</div>
+                  <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                    <span style={{ fontSize:12 }}>{statusIcon[s.status]}</span>
+                    {(s.status==="queued"||s.status==="running") && (
+                      <span style={{ fontSize:10, color:statusColor[s.status], fontWeight:700 }}>{s.progress||0}%</span>
+                    )}
+                    <button onClick={e=>{e.stopPropagation();deleteScan(s.id);}} style={{ background:"none", border:"none", cursor:"pointer", fontSize:12, color:C.muted }}>✕</button>
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:6, marginTop:4, flexWrap:"wrap" }}>
+                  {(typeof s.tools==="string"?JSON.parse(s.tools):s.tools||[]).map(t=>(
+                    <span key={t} style={{ fontSize:10, background:"#f1f5f9", color:C.muted, padding:"1px 6px", borderRadius:6 }}>{t}</span>
+                  ))}
+                </div>
+                <div style={{ fontSize:10, color:C.muted, marginTop:4 }}>
+                  {s.scan_type} &nbsp;·&nbsp; {new Date(s.created_at).toLocaleDateString("en-GB",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}
+                </div>
+                {(s.status==="queued"||s.status==="running") && (
+                  <div style={{ marginTop:6, background:"#e5e7eb", borderRadius:4, height:4 }}>
+                    <div style={{ width:`${s.progress||0}%`, background:C.primary, borderRadius:4, height:4, transition:"width 0.5s" }}/>
+                  </div>
+                )}
+              </div>
+            ))}
+          </Card>
+        </div>
+
+        {/* ── Right: Results Panel ── */}
+        <div>
+          {!selectedScan ? (
+            <Card style={{ padding:60, textAlign:"center" }}>
+              <div style={{ fontSize:56, marginBottom:16 }}>🧪</div>
+              <div style={{ fontSize:16, fontWeight:700, color:C.text }}>No scan selected</div>
+              <div style={{ fontSize:13, color:C.muted, marginTop:8 }}>Launch a scan or select one from the list to view results</div>
+            </Card>
+          ) : loadingDetail ? (
+            <Card style={{ padding:60, textAlign:"center" }}>
+              <div style={{ fontSize:13, color:C.muted }}>Loading scan results…</div>
+            </Card>
+          ) : detail ? (
+            <div>
+              {/* Header */}
+              <Card style={{ padding:16, marginBottom:16 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                  <div>
+                    <div style={{ fontSize:18, fontWeight:800, color:C.text }}>{detail.target}</div>
+                    <div style={{ fontSize:12, color:C.muted, marginTop:3 }}>
+                      <span style={{ color:statusColor[detail.status], fontWeight:700 }}>{statusIcon[detail.status]} {detail.status}</span>
+                      &nbsp;·&nbsp; {detail.scan_type} &nbsp;·&nbsp;
+                      {detail.started_at ? new Date(detail.started_at).toLocaleString("en-GB") : "—"}
+                      {detail.completed_at && ` → ${new Date(detail.completed_at).toLocaleTimeString("en-GB")}`}
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", gap:10 }}>
+                    {detail.status==="completed" && (
+                      <button onClick={()=>downloadReport(detail.id)} style={{ padding:"8px 18px", borderRadius:8, border:`1px solid ${C.primary}`, background:"#fff", color:C.primary, cursor:"pointer", fontWeight:700, fontSize:13 }}>
+                        📄 Export PDF
+                      </button>
+                    )}
+                    <button onClick={()=>fetchDetail(detail.id)} style={{ padding:"8px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"#fff", color:C.muted, cursor:"pointer", fontSize:13 }}>
+                      ↻
+                    </button>
+                  </div>
+                </div>
+                {(detail.status==="queued"||detail.status==="running") && (
+                  <div style={{ marginTop:12, background:"#e5e7eb", borderRadius:6, height:8 }}>
+                    <div style={{ width:`${detail.progress||0}%`, background:C.primary, borderRadius:6, height:8, transition:"width 1s" }}/>
+                  </div>
+                )}
+              </Card>
+
+              {/* Severity summary */}
+              {detail.status==="completed" && sevCounts && (
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10, marginBottom:16 }}>
+                  {[
+                    { sev:"Critical", color:C.critical }, { sev:"High", color:C.high },
+                    { sev:"Medium", color:C.warn }, { sev:"Low", color:"#16a34a" }, { sev:"Info", color:"#6b7280" }
+                  ].map(({sev,color})=>(
+                    <Card key={sev} style={{ padding:14, textAlign:"center", border:`1px solid ${color}30`, background:color+"08" }}>
+                      <div style={{ fontSize:24, fontWeight:800, color }}>{sevCounts[sev]||0}</div>
+                      <div style={{ fontSize:11, color:C.muted }}>{sev}</div>
+                    </Card>
+                  ))}
+                </div>
+              )}
+
+              {/* Tabs */}
+              {detail.status==="completed" && (
+                <>
+                  <div style={{ display:"flex", gap:4, marginBottom:16 }}>
+                    {[
+                      { id:"overview", label:"Overview" },
+                      ...(detail.results?.nmap     ? [{ id:"nmap",    label:"🗺️ Nmap" }]    : []),
+                      ...(detail.results?.zaproxy  ? [{ id:"zaproxy", label:"🕷️ ZAProxy" }]  : []),
+                      ...(detail.results?.nessus   ? [{ id:"nessus",  label:"🔬 Nessus" }]  : []),
+                      ...(detail.results?.kali     ? [{ id:"kali",    label:"🐉 Kali" }]     : []),
+                      { id:"ai", label:"🤖 AI Analysis" },
+                    ].map(t => (
+                      <button key={t.id} onClick={()=>setActiveTab(t.id)} style={{ padding:"8px 16px", borderRadius:8, border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
+                        background: activeTab===t.id ? C.primary : "#f1f5f9", color: activeTab===t.id ? "#fff" : C.muted }}>
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Overview tab */}
+                  {activeTab==="overview" && (
+                    <div style={{ display:"grid", gap:12 }}>
+                      {VULN_TOOLS.map(t => {
+                        const res = detail.results?.[t.id];
+                        if (!res) return null;
+                        const ok = res.success !== false;
+                        return (
+                          <Card key={t.id} style={{ padding:16 }}>
+                            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                              <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                                <span style={{ fontSize:20 }}>{t.icon}</span>
+                                <div>
+                                  <div style={{ fontSize:14, fontWeight:700, color:C.text }}>{t.label}</div>
+                                  <div style={{ fontSize:12, color:ok?C.ok:C.critical, fontWeight:600 }}>{ok?"✓ Completed":"✗ Failed"}</div>
+                                </div>
+                              </div>
+                              <div style={{ textAlign:"right", fontSize:12, color:C.muted }}>
+                                {t.id==="nmap"    && res.ports    && <span><strong style={{color:C.text}}>{res.ports.filter(p=>p.state==="open").length}</strong> open ports</span>}
+                                {t.id==="zaproxy" && res.alerts   && <span><strong style={{color:C.text}}>{res.alertCount}</strong> web alerts</span>}
+                                {t.id==="nessus"  && res.vulns    && <span><strong style={{color:C.text}}>{res.vulnCount}</strong> vulnerabilities</span>}
+                                {t.id==="kali"    && res.output   && <span>Output captured</span>}
+                                {!ok && <span style={{color:C.critical}}>{res.error?.slice(0,60)}</span>}
+                              </div>
+                            </div>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Nmap tab */}
+                  {activeTab==="nmap" && detail.results?.nmap && (
+                    <Card style={{ padding:20 }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Nmap Scan Results — {detail.target}</div>
+                      {detail.results.nmap.os && <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>OS: <strong>{detail.results.nmap.os}</strong></div>}
+                      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                        <thead><tr style={{ background:"#f8fafc" }}>
+                          {["Port","Protocol","State","Service"].map(h=>(
+                            <th key={h} style={{ padding:"9px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>{(detail.results.nmap.ports||[]).map((p,i)=>(
+                          <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                            <td style={{ padding:"10px 12px", fontFamily:"monospace", fontWeight:700, color:C.text }}>{p.port}</td>
+                            <td style={{ padding:"10px 12px", fontSize:12 }}>{p.protocol}</td>
+                            <td style={{ padding:"10px 12px" }}>
+                              <span style={{ color:p.state==="open"?C.critical:C.ok, fontWeight:700, fontSize:12 }}>{p.state}</span>
+                            </td>
+                            <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{p.service}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                      {detail.results.nmap.ports?.length===0 && <div style={{ textAlign:"center", padding:32, color:C.muted }}>No ports found</div>}
+                    </Card>
+                  )}
+
+                  {/* ZAProxy tab */}
+                  {activeTab==="zaproxy" && detail.results?.zaproxy && (
+                    <Card style={{ padding:20 }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>OWASP ZAProxy — Web Application Vulnerabilities</div>
+                      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                        <thead><tr style={{ background:"#f8fafc" }}>
+                          {["Risk","Alert","URL","CWE"].map(h=>(
+                            <th key={h} style={{ padding:"9px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>{(detail.results.zaproxy.alerts||[]).map((a,i)=>(
+                          <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                            <td style={{ padding:"10px 12px" }}><SeverityBadge level={a.risk}/></td>
+                            <td style={{ padding:"10px 12px", fontSize:13, color:C.text }}>{a.name}</td>
+                            <td style={{ padding:"10px 12px", fontFamily:"monospace", fontSize:11, color:C.muted, maxWidth:200, overflow:"hidden", textOverflow:"ellipsis" }}>{a.url}</td>
+                            <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{a.cweid||"—"}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                      {detail.results.zaproxy.alerts?.length===0 && <div style={{ textAlign:"center", padding:32, color:C.ok, fontSize:13 }}>✅ No web application vulnerabilities found</div>}
+                    </Card>
+                  )}
+
+                  {/* Nessus tab */}
+                  {activeTab==="nessus" && detail.results?.nessus && (
+                    <Card style={{ padding:20 }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:12 }}>Nessus Vulnerability Results</div>
+                      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                        <thead><tr style={{ background:"#f8fafc" }}>
+                          {["Severity","Vulnerability","Count"].map(h=>(
+                            <th key={h} style={{ padding:"9px 12px", textAlign:"left", fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", borderBottom:`2px solid ${C.border}` }}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>{(detail.results.nessus.vulns||[]).sort((a,b)=>["Critical","High","Medium","Low","Info"].indexOf(a.severity)-["Critical","High","Medium","Low","Info"].indexOf(b.severity)).map((v,i)=>(
+                          <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                            <td style={{ padding:"10px 12px" }}><SeverityBadge level={v.severity}/></td>
+                            <td style={{ padding:"10px 12px", fontSize:13, color:C.text }}>{v.name}</td>
+                            <td style={{ padding:"10px 12px", fontSize:13, fontWeight:700, color:C.text }}>{v.count}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </Card>
+                  )}
+
+                  {/* Kali tab */}
+                  {activeTab==="kali" && detail.results?.kali && (
+                    <Card style={{ padding:20 }}>
+                      <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:8 }}>Kali Linux Output</div>
+                      {detail.results.kali.command && <div style={{ fontFamily:"monospace", fontSize:11, color:C.muted, marginBottom:12, background:"#1e293b", color:"#94a3b8", padding:"8px 12px", borderRadius:6 }}>$ {detail.results.kali.command}</div>}
+                      <pre style={{ background:"#0f172a", color:"#e2e8f0", padding:16, borderRadius:10, fontSize:12, overflowX:"auto", whiteSpace:"pre-wrap", maxHeight:500, overflowY:"auto" }}>
+                        {detail.results.kali.output || "No output"}
+                      </pre>
+                    </Card>
+                  )}
+
+                  {/* AI Analysis tab */}
+                  {activeTab==="ai" && (
+                    <Card style={{ padding:24 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
+                        <span style={{ fontSize:24 }}>🤖</span>
+                        <div>
+                          <div style={{ fontSize:14, fontWeight:800, color:C.text }}>Claude AI Security Analysis</div>
+                          <div style={{ fontSize:12, color:C.muted }}>Automated threat intelligence and remediation guidance</div>
+                        </div>
+                      </div>
+                      {detail.ai_analysis ? (
+                        <div style={{ background:"#eff6ff", border:`1px solid #bfdbfe`, borderRadius:10, padding:20, fontSize:13, lineHeight:1.8, color:C.text, whiteSpace:"pre-wrap" }}>
+                          {detail.ai_analysis}
+                        </div>
+                      ) : (
+                        <div style={{ textAlign:"center", padding:40, color:C.muted }}>
+                          <div style={{ fontSize:13 }}>AI analysis not available.</div>
+                          <div style={{ fontSize:12, marginTop:6 }}>Add ANTHROPIC_API_KEY to your .env file to enable Claude AI analysis.</div>
+                        </div>
+                      )}
+                    </Card>
+                  )}
+                </>
+              )}
+
+              {/* Error display */}
+              {detail.status==="failed" && detail.error && (
+                <Card style={{ padding:20, border:`2px solid ${C.critical}`, background:"#fef2f2" }}>
+                  <div style={{ fontSize:14, fontWeight:700, color:C.critical, marginBottom:8 }}>Scan Failed</div>
+                  <div style={{ fontSize:12, color:C.critical, fontFamily:"monospace" }}>{detail.error}</div>
+                </Card>
+              )}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 // ── Assets & Patches ─────────────────────────────────────────────────────────
 function AssetsPage({ data }) {
   const d = data || {};
@@ -2756,6 +3460,9 @@ const FIELDS = {
   qualys:       [["username","Username","qualys-reader@company.com"],["password","Password",""],["platform","Platform URL","https://qualysapi.qualys.com"]],
   manageengine: [["host","Server URL","https://meserver:8443"],["apikey","API Key","Zoho OAuth token"]],
   taegis:       [["clientId","Client ID",""],["clientSecret","Client Secret",""],["region","Region","us1"]],
+  kali:         [["host","Kali Host / IP","192.168.1.100"],["port","SSH Port","22"],["username","SSH Username","kali"],["password","SSH Password (or leave blank if using key)",""],["private_key","SSH Private Key (PEM, optional)",""]],
+  nessus:       [["host","Nessus Host","localhost"],["port","Port","8834"],["username","Username","admin"],["password","Password",""]],
+  zaproxy:      [["host","ZAProxy Host","localhost"],["port","ZAProxy Port","8080"],["api_key","API Key (if set)",""]],
 };
 
 // ── Admin – Integration Status ────────────────────────────────────────────────
@@ -3796,6 +4503,8 @@ function Dashboard({ user, onLogout }) {
     { id:"assets",      icon:"💻", label:"Assets & Patches" },
     { id:"cloudanalyst",icon:"☁️", label:"Cloud Security" },
     { id:"siem",        icon:"📡", label:"SIEM / XDR" },
+    { id:"grc",         icon:"📋", label:"GRC & Compliance" },
+    { id:"vuln-assess", icon:"🧪", label:"Vuln Assessment" },
     { id:"admin",       icon:"🔌", label:"Admin" },
   ];
 
@@ -3850,6 +4559,8 @@ function Dashboard({ user, onLogout }) {
       case "assets":       return <AssetsPage {...p}/>;
       case "cloudanalyst": return <CloudAnalystPage {...p}/>;
       case "siem":         return <SIEMPage {...p}/>;
+      case "grc":          return <GRCPage />;
+      case "vuln-assess":  return <VulnAssessmentPage />;
       case "admin":        return <AdminPage user={user} onLogout={onLogout}/>;
       case "settings":     return <IntegrationsPage onSave={loadData}/>;
       default:             return <OverviewPage {...p}/>;
