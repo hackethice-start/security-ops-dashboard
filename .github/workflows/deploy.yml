@@ -51,15 +51,42 @@ jobs:
       - name: Start stack
         run: docker compose up --detach
 
-      - name: Wait for startup
-        run: sleep 35
+      - name: Wait and diagnose startup
+        run: |
+          echo "=== Waiting 60s for containers to start ==="
+          sleep 60
+          echo ""
+          echo "=== Container status ==="
+          docker compose ps -a
+          echo ""
+          echo "=== Dashboard logs ==="
+          docker compose logs dashboard --tail 40
+          echo ""
+          echo "=== Backend logs ==="
+          docker compose logs backend --tail 20
+          echo ""
+          echo "=== Vuln logs ==="
+          docker compose logs vuln --tail 20
 
       - name: Health check dashboard
-        run: curl -f --retry 3 --retry-delay 5 http://localhost:3000/
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i..."
+            curl -sf http://localhost:3000/ && echo "Dashboard OK" && exit 0
+            docker compose logs dashboard --tail 10
+            sleep 10
+          done
+          echo "Dashboard failed to respond"
+          exit 1
 
       - name: Health check backend
-        run: curl -f --retry 3 --retry-delay 5 http://localhost:4000/api/health
+        run: curl -f --retry 5 --retry-delay 5 http://localhost:4000/api/health
 
       - name: Show status
         if: always()
-        run: docker compose ps && docker compose logs --tail 30
+        run: |
+          echo "=== Final container state ==="
+          docker compose ps -a
+          echo ""
+          echo "=== All service logs (last 50 lines each) ==="
+          docker compose logs --tail 50
