@@ -2223,6 +2223,19 @@ function FirewallPage({ data }) {
           </div>
         </Card>
 
+        {/* ── Empty data warning ── */}
+        {fw.policyCount === 0 && (
+          <div style={{ padding:"14px 18px", borderRadius:10, background:"#fef3c7", border:"1px solid #fcd34d", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div>
+              <div style={{ fontSize:13, fontWeight:700, color:"#92400e" }}>⚠️ No policy data received from FortiGate</div>
+              <div style={{ fontSize:12, color:"#78350f", marginTop:2 }}>The API connected but returned 0 firewall policies. This usually means the API key lacks read permissions on the firewall policy endpoint, or data hasn't been collected yet.</div>
+            </div>
+            <button onClick={collectNow} disabled={collecting} style={{ marginLeft:16, padding:"8px 14px", borderRadius:8, border:"1px solid #d97706", background:"#fffbeb", color:"#92400e", fontSize:12, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
+              {collecting ? "⟳ Collecting…" : "🔄 Re-collect Now"}
+            </button>
+          </div>
+        )}
+
         {/* ── Risk indicators ── */}
         {(fw.unusedRules>0||fw.overpermissive>0||fw.noLogging>0) && (
           <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>

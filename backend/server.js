@@ -787,6 +787,13 @@ app.post("/api/integrations/:tool", requireAuth, async (req, res) => {
     );
     // Reschedule collectors to pick up new interval
     scheduleCollectors().catch(console.error);
+    // Immediately trigger collection so the page shows data right away
+    const immediateCollectors = {
+      fortinet: collectFortinet, paloalto: collectPaloAlto, upguard: collectUpGuard,
+      azure: collectAzure, qualys: collectQualys, manageengine: collectManageEngine, taegis: collectTaegis,
+    };
+    const fn = immediateCollectors[tool];
+    if (fn) fn().catch(e => console.error(`[auto-collect] ${tool}:`, e.message));
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -813,8 +820,15 @@ app.post("/api/integrations/:tool/test", requireAuth, async (req, res) => {
       if (!inst) return res.json({ success: false, error: "Instance not found" });
       try {
         result = await withTimeout(collectFortinetInstance(inst), TIMEOUT, "Fortinet");
-        sample = { instance: inst.name, policies: result.policies?.length||0, message: "FortiGate API reachable" };
+        sample = { instance: inst.name, policies: result.policies?.length||0, interfaces: result.interfaces?.length||0, message: "FortiGate API reachable" };
         await setStatus("fortinet", "connected");
+        // Save snapshot immediately so Firewall page shows data right after Test
+        const instances = c.instances || [c];
+        const allResults = await Promise.all(
+          instances.map(i => collectFortinetInstance(i).catch(e => null))
+        ).then(rs => rs.filter(Boolean));
+        if (allResults.length > 0)
+          await saveSnapshot("fortinet", { source:"fortinet", instances: allResults });
       } catch(e) { return res.json({ success: false, error: e.message }); }
 
     } else if (tool === "azure") {
