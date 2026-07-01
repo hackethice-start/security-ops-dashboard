@@ -1,18 +1,28 @@
 version: "3.9"
 
+# ── SecOps Command Center — Full Stack ───────────────────────────────────────
+# Services:
+#   dashboard   :3000  React SPA (nginx)
+#   backend     :4000  SecOps data collection + integrations
+#   grc         :4001  GRC Compliance (DPDPA / PCI DSS / ISO 27001)
+#   vuln        :4002  Vulnerability Assessment (Nmap/ZAP/Nessus/Qualys/Kali)
+#   db          :5432  PostgreSQL 16 (shared by all backend services)
+
 services:
+  # ── React SPA ──────────────────────────────────────────────────────────────
   dashboard:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "3000:80"
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-      - 1.1.1.1
+    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
     depends_on:
       backend:
+        condition: service_started
+      grc:
+        condition: service_started
+      vuln:
         condition: service_started
     restart: unless-stopped
     healthcheck:
@@ -21,16 +31,14 @@ services:
       timeout: 10s
       retries: 3
 
+  # ── SecOps Backend (data collection, integrations, auth) ───────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
       - "4000:4000"
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-      - 1.1.1.1
+    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
     environment:
       - POSTGRES_HOST=db
       - POSTGRES_DB=${POSTGRES_DB:-secops}
@@ -39,6 +47,7 @@ services:
       - PORT=4000
       - NODE_ENV=production
       - JWT_SECRET=${JWT_SECRET:-secops-jwt-change-this-in-production}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy
@@ -49,11 +58,67 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── GRC Compliance Service ─────────────────────────────────────────────────
+  grc:
+    build:
+      context: ./services/grc
+      dockerfile: Dockerfile
+    ports:
+      - "4001:4001"
+    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_DB=${POSTGRES_DB:-secops}
+      - POSTGRES_USER=${POSTGRES_USER:-secops}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - GRC_PORT=4001
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET:-secops-jwt-change-this-in-production}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Vulnerability Assessment Service ──────────────────────────────────────
+  vuln:
+    build:
+      context: ./services/vuln
+      dockerfile: Dockerfile
+    ports:
+      - "4002:4002"
+    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_DB=${POSTGRES_DB:-secops}
+      - POSTGRES_USER=${POSTGRES_USER:-secops}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - VULN_PORT=4002
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET:-secops-jwt-change-this-in-production}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Note: vuln service needs cap_add for nmap raw socket access
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── PostgreSQL 16 (shared database) ────────────────────────────────────────
   db:
     image: postgres:16-alpine
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
+    dns: [8.8.8.8, 8.8.4.4]
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-secops}
       - POSTGRES_USER=${POSTGRES_USER:-secops}
@@ -70,3 +135,7 @@ services:
 
 volumes:
   pg_data:
+
+networks:
+  default:
+    name: secops-network

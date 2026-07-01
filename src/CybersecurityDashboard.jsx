@@ -453,7 +453,13 @@ function transformSnapshot(snap) {
 /* ═══════════════════════════════════════════════════════════════════════════
    CONFIG
 ═══════════════════════════════════════════════════════════════════════════ */
-const API = `http://${window.location.hostname}:4000`;
+const API      = `http://${window.location.hostname}:4000`;  // SecOps backend
+
+// GRC and Vuln services: in production nginx proxies /api/grc/ and /api/vuln/
+// via the same port 80. In dev (Vite :3000 or direct), hit services directly.
+const _isDev   = ["3000","5173",""].includes(window.location.port) && window.location.hostname === "localhost";
+const GRC_API  = _isDev ? `http://${window.location.hostname}:4001` : `http://${window.location.hostname}`;
+const VULN_API = _isDev ? `http://${window.location.hostname}:4002` : `http://${window.location.hostname}`;
 
 // All API calls include credentials (cookie) for auth
 const apiFetch = (url, opts = {}) => fetch(url, {
@@ -2735,7 +2741,7 @@ function GRCPage() {
   async function fetchControls(fw) {
     setLoading(true);
     try {
-      const r = await apiFetch(`${API}/api/grc/${fw}`);
+      const r = await apiFetch(`${GRC_API}/api/grc/${fw}`);
       const data = await r.json();
       setControls(Array.isArray(data) ? data : []);
     } catch(e) { setControls([]); }
@@ -2747,7 +2753,7 @@ function GRCPage() {
   async function saveControl(ctrl, updates) {
     setSaving(true);
     try {
-      await apiFetch(`${API}/api/grc/${framework}/${ctrl.control_id}`, { method:"PUT", body: JSON.stringify(updates) });
+      await apiFetch(`${GRC_API}/api/grc/${framework}/${ctrl.control_id}`, { method:"PUT", body: JSON.stringify(updates) });
       setControls(prev => prev.map(c => c.control_id === ctrl.control_id ? { ...c, ...updates, updated_at: new Date().toISOString() } : c));
     } catch(e) { alert("Save failed: " + e.message); }
     setEditCtrl(null);
@@ -2827,7 +2833,7 @@ function GRCPage() {
             {categories.map(cat => <option key={cat} value={cat}>{cat === "all" ? "All Categories" : cat}</option>)}
           </select>
           <div style={{ marginLeft:"auto", fontSize:12, color:C.muted }}>{filtered.length} controls</div>
-          <button onClick={()=>{ if(window.confirm("Reset all controls to Not Assessed?")) apiFetch(`${API}/api/grc/${framework}/reset`,{method:"POST"}).then(()=>fetchControls(framework)); }}
+          <button onClick={()=>{ if(window.confirm("Reset all controls to Not Assessed?")) apiFetch(`${GRC_API}/api/grc/${framework}/reset`,{method:"POST"}).then(()=>fetchControls(framework)); }}
             style={{ padding:"6px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"#fff", color:C.muted, cursor:"pointer", fontSize:12 }}>
             Reset Framework
           </button>
@@ -2928,7 +2934,7 @@ function VulnAssessmentPage() {
   async function fetchScans() {
     setLoading(true);
     try {
-      const r = await apiFetch(`${API}/api/vuln/scans`);
+      const r = await apiFetch(`${VULN_API}/api/vuln/scans`);
       const data = await r.json();
       setScans(Array.isArray(data) ? data : []);
     } catch(e) {}
@@ -2939,7 +2945,7 @@ function VulnAssessmentPage() {
   async function fetchDetail(id) {
     setLoadingDetail(true);
     try {
-      const r = await apiFetch(`${API}/api/vuln/scan/${id}`);
+      const r = await apiFetch(`${VULN_API}/api/vuln/scan/${id}`);
       const data = await r.json();
       setScanDetail(data);
     } catch(e) {}
@@ -2977,7 +2983,7 @@ function VulnAssessmentPage() {
     if (selectedTools.length === 0) return alert("Select at least one tool.");
     setLaunching(true);
     try {
-      const r = await apiFetch(`${API}/api/vuln/scan`, { method:"POST", body: JSON.stringify({ target:target.trim(), scan_type:profile, tools:selectedTools }) });
+      const r = await apiFetch(`${VULN_API}/api/vuln/scan`, { method:"POST", body: JSON.stringify({ target:target.trim(), scan_type:profile, tools:selectedTools }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Launch failed");
       await fetchScans();
@@ -2989,13 +2995,13 @@ function VulnAssessmentPage() {
 
   async function deleteScan(id) {
     if (!window.confirm("Delete this scan?")) return;
-    await apiFetch(`${API}/api/vuln/scan/${id}`, { method:"DELETE" });
+    await apiFetch(`${VULN_API}/api/vuln/scan/${id}`, { method:"DELETE" });
     if (selectedScan === id) { setSelectedScan(null); setScanDetail(null); }
     fetchScans();
   }
 
   function downloadReport(id) {
-    window.open(`${API}/api/vuln/scan/${id}/pdf?token=${document.cookie.match(/session=([^;]+)/)?.[1]||""}`, "_blank");
+    window.open(`${VULN_API}/api/vuln/scan/${id}/pdf?token=${document.cookie.match(/session=([^;]+)/)?.[1]||""}`, "_blank");
   }
 
   const statusColor = { queued:"#6b7280", running:"#3b82f6", completed:"#16a34a", failed:"#dc2626" };
@@ -4478,6 +4484,7 @@ function Dashboard({ user, onLogout }) {
   const isExec  = user.role === "executive";
   const isAdmin = user.role === "admin";
 
+  const [portal,   setPortal]   = useState("secops"); // "secops" | "grc" | "vuln-assess"
   const [viewRole, setViewRole] = useState(isExec ? "executive" : "analyst");
   const [page,     setPage]     = useState(isExec ? "overview" : "alerts");
   const [data,     setData]     = useState(null);
@@ -4503,8 +4510,6 @@ function Dashboard({ user, onLogout }) {
     { id:"assets",      icon:"💻", label:"Assets & Patches" },
     { id:"cloudanalyst",icon:"☁️", label:"Cloud Security" },
     { id:"siem",        icon:"📡", label:"SIEM / XDR" },
-    { id:"grc",         icon:"📋", label:"GRC & Compliance" },
-    { id:"vuln-assess", icon:"🧪", label:"Vuln Assessment" },
     { id:"admin",       icon:"🔌", label:"Admin" },
   ];
 
@@ -4590,22 +4595,34 @@ function Dashboard({ user, onLogout }) {
           </div>
         </div>
 
-        {/* View toggle — hidden for pure executives */}
-        {!isExec && (
-          <div style={{ display:"flex", background:"rgba(0,0,0,0.25)", borderRadius:8, padding:3, gap:2 }}>
-            {[["executive","🏢 Executive Board"],["analyst","🔬 Security Analyst"]].map(([r,l])=>(
+        {/* Portal switcher — top-level module selector */}
+        <div style={{ display:"flex", background:"rgba(0,0,0,0.3)", borderRadius:10, padding:3, gap:2 }}>
+          {[
+            { id:"secops",      label:"🛡️ Security Ops",   color:"#3b82f6" },
+            { id:"grc",         label:"📋 GRC & Compliance", color:"#10b981" },
+            { id:"vuln-assess", label:"🧪 Vuln Assessment",  color:"#f59e0b" },
+          ].map(p => (
+            <button key={p.id} onClick={()=>setPortal(p.id)}
+              style={{ padding:"5px 14px", borderRadius:7, border:"none", cursor:"pointer", fontWeight:700, fontSize:12,
+                background: portal===p.id ? p.color : "transparent",
+                color:      portal===p.id ? "#fff" : "#64748b",
+                transition:"all 0.15s", boxShadow: portal===p.id ? `0 2px 8px ${p.color}60` : "none" }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Within Security Ops: Executive / Analyst toggle (hidden for pure exec) */}
+        {portal==="secops" && !isExec && (
+          <div style={{ display:"flex", background:"rgba(0,0,0,0.2)", borderRadius:8, padding:3, gap:2 }}>
+            {[["executive","🏢 Board"],["analyst","🔬 Analyst"]].map(([r,l])=>(
               <button key={r} onClick={()=>{ setViewRole(r); setPage(r==="executive"?"overview":"alerts"); }}
-                style={{ padding:"5px 14px", borderRadius:6, border:"none", cursor:"pointer", fontWeight:600, fontSize:12,
-                  background:viewRole===r?"white":"transparent", color:viewRole===r?C.header:"#94a3b8", transition:"all 0.15s" }}>
+                style={{ padding:"4px 12px", borderRadius:6, border:"none", cursor:"pointer", fontWeight:600, fontSize:11,
+                  background:viewRole===r?"rgba(255,255,255,0.15)":"transparent",
+                  color:viewRole===r?"#e2e8f0":"#64748b", transition:"all 0.15s" }}>
                 {l}
               </button>
             ))}
-          </div>
-        )}
-        {isExec && (
-          <div style={{ padding:"5px 14px", borderRadius:6, background:"rgba(245,158,11,0.2)",
-            border:"1px solid rgba(245,158,11,0.3)", fontSize:12, fontWeight:600, color:"#fbbf24" }}>
-            🏢 Executive Board
           </div>
         )}
 
@@ -4689,52 +4706,75 @@ function Dashboard({ user, onLogout }) {
       {/* ── BODY ──────────────────────────────────────────────────────────── */}
       <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
 
-        {/* Sidebar */}
-        <aside style={{ width:216, background:C.sidebar, display:"flex", flexDirection:"column", flexShrink:0, overflow:"auto" }}>
-          <div style={{ padding:"14px 16px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
-            <div style={{ fontSize:9, color:"#334155", textTransform:"uppercase", letterSpacing:1.8, fontWeight:700 }}>
-              {viewRole==="executive"?"Board & Executive":"Security Team"}
+        {/* ── GRC PORTAL — full-screen, no sidebar ── */}
+        {portal === "grc" && (
+          <main style={{ flex:1, overflow:"auto", padding:28, background:"#f0fdf8" }}>
+            <div style={{ maxWidth:1400, margin:"0 auto" }}>
+              <GRCPage />
             </div>
-          </div>
-          <nav style={{ flex:1, paddingTop:6 }}>
-            {nav.map(n=>(
-              <button key={n.id} onClick={()=>setPage(n.id)}
-                style={{ display:"flex", alignItems:"center", gap:11, padding:"9px 16px", width:"100%", border:"none",
-                  background:page===n.id?"rgba(59,130,246,0.14)":"transparent", cursor:"pointer", textAlign:"left",
-                  borderLeft:`3px solid ${page===n.id?"#3b82f6":"transparent"}`, transition:"all 0.12s" }}>
-                <span style={{ fontSize:15, lineHeight:1 }}>{n.icon}</span>
-                <span style={{ fontSize:13, color:page===n.id?"#e2e8f0":"#94a3b8", fontWeight:page===n.id?600:400 }}>{n.label}</span>
-              </button>
-            ))}
-          </nav>
-          <div style={{ padding:12, borderTop:"1px solid rgba(255,255,255,0.04)" }}>
-            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px",
-              borderRadius:8, background:"rgba(255,255,255,0.04)" }}>
-              <div style={{ width:26, height:26, borderRadius:"50%", background:userColor,
-                display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"white", flexShrink:0 }}>
-                {(user.display_name||user.username).charAt(0).toUpperCase()}
-              </div>
-              <div style={{ overflow:"hidden" }}>
-                <div style={{ fontSize:11, color:"#94a3b8", fontWeight:600, whiteSpace:"nowrap",
-                  overflow:"hidden", textOverflow:"ellipsis" }}>{user.display_name||user.username}</div>
-                <div style={{ fontSize:9, color:"#475569", textTransform:"capitalize" }}>{user.role}</div>
-              </div>
-            </div>
-          </div>
-        </aside>
+          </main>
+        )}
 
-        {/* Main content */}
-        <main style={{ flex:1, overflow:"auto", padding:24 }}>
-          {loading && !data ? (
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", flexDirection:"column", gap:16 }}>
-              <div style={{ width:44, height:44, border:"3px solid #3b82f6", borderTopColor:"transparent",
-                borderRadius:"50%", animation:"spin 0.8s linear infinite" }}/>
-              <div style={{ color:C.muted, fontSize:14 }}>Loading security data…</div>
+        {/* ── VULN ASSESSMENT PORTAL — full-screen, no sidebar ── */}
+        {portal === "vuln-assess" && (
+          <main style={{ flex:1, overflow:"auto", padding:28, background:"#fffbf0" }}>
+            <div style={{ maxWidth:1400, margin:"0 auto" }}>
+              <VulnAssessmentPage />
             </div>
-          ) : page === "change-password" ? (
-            <ChangePasswordPage onBack={()=>setPage(viewRole==="executive"?"overview":"alerts")} />
-          ) : renderPage()}
-        </main>
+          </main>
+        )}
+
+        {/* ── SECURITY OPS PORTAL — sidebar + pages ── */}
+        {portal === "secops" && (
+          <>
+            {/* Sidebar */}
+            <aside style={{ width:216, background:C.sidebar, display:"flex", flexDirection:"column", flexShrink:0, overflow:"auto" }}>
+              <div style={{ padding:"14px 16px 10px", borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
+                <div style={{ fontSize:9, color:"#334155", textTransform:"uppercase", letterSpacing:1.8, fontWeight:700 }}>
+                  {viewRole==="executive"?"Board & Executive":"Security Team"}
+                </div>
+              </div>
+              <nav style={{ flex:1, paddingTop:6 }}>
+                {nav.map(n=>(
+                  <button key={n.id} onClick={()=>setPage(n.id)}
+                    style={{ display:"flex", alignItems:"center", gap:11, padding:"9px 16px", width:"100%", border:"none",
+                      background:page===n.id?"rgba(59,130,246,0.14)":"transparent", cursor:"pointer", textAlign:"left",
+                      borderLeft:`3px solid ${page===n.id?"#3b82f6":"transparent"}`, transition:"all 0.12s" }}>
+                    <span style={{ fontSize:15, lineHeight:1 }}>{n.icon}</span>
+                    <span style={{ fontSize:13, color:page===n.id?"#e2e8f0":"#94a3b8", fontWeight:page===n.id?600:400 }}>{n.label}</span>
+                  </button>
+                ))}
+              </nav>
+              <div style={{ padding:12, borderTop:"1px solid rgba(255,255,255,0.04)" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px",
+                  borderRadius:8, background:"rgba(255,255,255,0.04)" }}>
+                  <div style={{ width:26, height:26, borderRadius:"50%", background:userColor,
+                    display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"white", flexShrink:0 }}>
+                    {(user.display_name||user.username).charAt(0).toUpperCase()}
+                  </div>
+                  <div style={{ overflow:"hidden" }}>
+                    <div style={{ fontSize:11, color:"#94a3b8", fontWeight:600, whiteSpace:"nowrap",
+                      overflow:"hidden", textOverflow:"ellipsis" }}>{user.display_name||user.username}</div>
+                    <div style={{ fontSize:9, color:"#475569", textTransform:"capitalize" }}>{user.role}</div>
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            {/* Main content */}
+            <main style={{ flex:1, overflow:"auto", padding:24 }}>
+              {loading && !data ? (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", flexDirection:"column", gap:16 }}>
+                  <div style={{ width:44, height:44, border:"3px solid #3b82f6", borderTopColor:"transparent",
+                    borderRadius:"50%", animation:"spin 0.8s linear infinite" }}/>
+                  <div style={{ color:C.muted, fontSize:14 }}>Loading security data…</div>
+                </div>
+              ) : page === "change-password" ? (
+                <ChangePasswordPage onBack={()=>setPage(viewRole==="executive"?"overview":"alerts")} />
+              ) : renderPage()}
+            </main>
+          </>
+        )}
       </div>
 
       {/* Global styles */}

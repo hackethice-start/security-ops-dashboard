@@ -1,0 +1,17 @@
+{
+  "name": "secops-grc-service",
+  "version": "1.0.0",
+  "description": "GRC Compliance microservice — DPDPA, PCI DSS 4.0.1, ISO 27001:2022",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "pg": "^8.11.3",
+    "jsonwebtoken": "^9.0.2",
+    "cookie-parser": "^1.4.6"
+  }
+}
