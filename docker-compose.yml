@@ -6,7 +6,7 @@ version: "3.9"
 #   backend     :4000  SecOps data collection + integrations
 #   grc         :4001  GRC Compliance (DPDPA / PCI DSS / ISO 27001)
 #   vuln        :4002  Vulnerability Assessment orchestrator
-#   kali        :5000  Kali Linux scan agent (nmap, nikto, gobuster, sqlmap…)
+#   kali               External Kali Linux server (SSH) — configured in Settings
 #   zaproxy     :8080  OWASP ZAProxy web app scanner
 #   db          :5432  PostgreSQL 16 (shared by all backend services)
 
@@ -109,14 +109,14 @@ services:
       - NODE_ENV=production
       - JWT_SECRET=${JWT_SECRET:-secops-jwt-change-this-in-production}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - KALI_AGENT_URL=http://kali:5000
-      - KALI_AGENT_TOKEN=${KALI_AGENT_TOKEN:-secops-kali-agent-token-change-me}
+      - KALI_HOST=${KALI_HOST:-192.168.101.6}
+      - KALI_PORT=${KALI_PORT:-22}
+      - KALI_USER=${KALI_USER:-kali}
+      - KALI_PASS=${KALI_PASS:-kali}
       - ZAP_URL=http://zaproxy:8080
       - ZAP_API_KEY=${ZAP_API_KEY:-secops-zap-key}
     depends_on:
       db:
-        condition: service_healthy
-      kali:
         condition: service_healthy
       zaproxy:
         condition: service_healthy
@@ -127,33 +127,6 @@ services:
       test: ["CMD", "wget", "-qO-", "http://localhost:4002/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
-
-  # ── Kali Linux — Security Toolset + Scan Agent ─────────────────────────────
-  # Built from ./services/kali (Dockerfile pulls kalilinux/kali-rolling:latest)
-  kali:
-    build:
-      context: ./services/kali
-      dockerfile: Dockerfile
-    ports:
-      - "5000:5000"
-    dns: [8.8.8.8, 8.8.4.4, 1.1.1.1]
-    environment:
-      - AGENT_PORT=5000
-      - AGENT_TOKEN=${KALI_AGENT_TOKEN:-secops-kali-agent-token-change-me}
-      - MAX_SCAN_SECONDS=540
-    # NET_RAW + NET_ADMIN allow nmap SYN/OS-detection scans on bridge networks
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
-    restart: unless-stopped
-    networks:
-      - default
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 15s
-      start_period: 90s
       retries: 5
 
   # ── OWASP ZAProxy — Web Application Scanner ────────────────────────────────

@@ -190,61 +190,186 @@ async function runQualys(target) {
   }
 }
 
-// ── Kali agent base URL (Docker service name resolves internally) ──────────
-const KALI_AGENT_URL  = process.env.KALI_AGENT_URL  || "http://kali:5000";
-const KALI_AGENT_TOKEN = process.env.KALI_AGENT_TOKEN || "secops-kali-agent-token-change-me";
-const ZAP_URL         = process.env.ZAP_URL          || "http://zaproxy:8080";
-const ZAP_API_KEY     = process.env.ZAP_API_KEY      || "secops-zap-key";
+// ── ZAProxy ───────────────────────────────────────────────────────────────
+const ZAP_URL     = process.env.ZAP_URL     || "http://zaproxy:8080";
+const ZAP_API_KEY = process.env.ZAP_API_KEY || "secops-zap-key";
 
-const kaliHeaders = () => ({
-  "Content-Type": "application/json",
-  "Authorization": `Bearer ${KALI_AGENT_TOKEN}`,
-});
+// ── Kali SSH — connect to external Kali server via SSH ────────────────────
+const { Client: SshClient } = require("ssh2");
 
-async function getKaliTools() {
+// Read Kali SSH credentials from DB (stored via Settings → Kali integration)
+// Falls back to env vars for initial bootstrap
+async function getKaliCreds() {
   try {
-    const r = await axios.get(`${KALI_AGENT_URL}/api/tools`, { headers: kaliHeaders(), timeout: 10000 });
-    return r.data;
-  } catch(e) {
-    return null;
-  }
+    const r = await pool.query(
+      "SELECT creds FROM credentials WHERE tool='kali' LIMIT 1"
+    );
+    if (r.rows.length) {
+      const c = r.rows[0].creds;
+      return {
+        host:     c.host     || process.env.KALI_HOST || "192.168.101.6",
+        port:     parseInt(c.port || process.env.KALI_PORT || "22"),
+        username: c.username || process.env.KALI_USER || "kali",
+        password: c.password || process.env.KALI_PASS || "kali",
+      };
+    }
+  } catch(e) {}
+  return {
+    host:     process.env.KALI_HOST || "192.168.101.6",
+    port:     parseInt(process.env.KALI_PORT || "22"),
+    username: process.env.KALI_USER || "kali",
+    password: process.env.KALI_PASS || "kali",
+  };
 }
 
-async function runKaliTool(tool, target, profile, extraFlags) {
+// Execute a command on the remote Kali server via SSH
+function sshExec(creds, command, timeoutMs = 300000) {
+  return new Promise((resolve) => {
+    const conn = new SshClient();
+    let stdout = "", stderr = "";
+    let done = false;
+
+    const finish = (timedOut = false) => {
+      if (done) return;
+      done = true;
+      conn.end();
+      resolve({ stdout, stderr, timedOut, success: !timedOut && stderr.length < stdout.length + 1 });
+    };
+
+    const timer = setTimeout(() => finish(true), timeoutMs);
+
+    conn.on("ready", () => {
+      conn.exec(command, (err, stream) => {
+        if (err) { clearTimeout(timer); finish(); return; }
+        stream.on("data", d => { stdout += d.toString(); });
+        stream.stderr.on("data", d => { stderr += d.toString(); });
+        stream.on("close", () => { clearTimeout(timer); finish(); });
+      });
+    });
+    conn.on("error", () => { clearTimeout(timer); finish(); });
+    conn.connect({ ...creds, readyTimeout: 15000, keepaliveInterval: 10000 });
+  });
+}
+
+// Tool command templates — adjusted per profile
+const KALI_CMDS = {
+  nmap:     { quick:"nmap -F --open -T4 {t}",      standard:"nmap -sV --open -T4 {t}",      deep:"nmap -sV -sC -O --open -T4 {t}" },
+  nikto:    { quick:"nikto -h {t} -Tuning x 6",    standard:"nikto -h {t}",                 deep:"nikto -h {t} -Tuning 1234567890ab" },
+  gobuster: { quick:"gobuster dir -u http://{t} -w /usr/share/wordlists/dirb/common.txt -q --no-error -t 20",
+              standard:"gobuster dir -u http://{t} -w /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt -q --no-error -t 30",
+              deep:"gobuster dir -u http://{t} -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -q --no-error -t 50" },
+  sslscan:  { quick:"sslscan --no-colour {t}", standard:"sslscan --no-colour {t}", deep:"sslscan --no-colour --show-certificate {t}" },
+  sqlmap:   { quick:"sqlmap -u 'http://{t}' --batch --level=1 --risk=1 --forms -q",
+              standard:"sqlmap -u 'http://{t}' --batch --level=2 --risk=2 --forms -q",
+              deep:"sqlmap -u 'http://{t}' --batch --level=3 --risk=3 --forms -q" },
+  whatweb:  { quick:"whatweb {t} --log-brief=/dev/stdout 2>/dev/null",
+              standard:"whatweb -a 3 {t} --log-brief=/dev/stdout 2>/dev/null",
+              deep:"whatweb -a 4 {t} --log-brief=/dev/stdout 2>/dev/null" },
+  masscan:  { quick:"masscan {t} -p80,443,22,21,8080,8443 --rate=500 2>/dev/null",
+              standard:"masscan {t} -p1-10000 --rate=1000 2>/dev/null",
+              deep:"masscan {t} -p1-65535 --rate=2000 2>/dev/null" },
+  dnsenum:  { quick:"dnsenum --noreverse --nocolor {t} 2>/dev/null",
+              standard:"dnsenum --nocolor {t} 2>/dev/null",
+              deep:"dnsenum --nocolor --threads 5 {t} 2>/dev/null" },
+};
+
+// Parse structured output from each tool
+function parseKaliOutput(tool, raw) {
+  const out = raw.stdout || "";
+  const base = { tool, success: true, output: out.slice(0, 8000) };
   try {
-    const r = await axios.post(`${KALI_AGENT_URL}/api/scan`, {
-      tool, target, profile: profile || "standard",
-      extra_flags: extraFlags || "", timeout: 540,
-    }, { headers: kaliHeaders(), timeout: 570000 });
-    return r.data;
-  } catch(e) {
-    return { tool, success: false, error: e.message };
-  }
+    if (tool === "nmap") {
+      const ports = [];
+      for (const line of out.split("\n")) {
+        const m = line.match(/^(\d+)\/(tcp|udp)\s+(open|closed|filtered)\s+(\S+)(?:\s+(.*))?/);
+        if (m) ports.push({ port: m[1], protocol: m[2], state: m[3], service: m[4], version: (m[5]||"").trim() });
+      }
+      const osMatch = out.match(/OS details?: (.+)/i);
+      return { ...base, open_ports: ports.filter(p=>p.state==="open"), os_guess: osMatch?.[1] || null };
+    }
+    if (tool === "nikto") {
+      const findings = [];
+      for (const line of out.split("\n")) {
+        if (line.startsWith("+ ") && !line.startsWith("+ Target") && !line.startsWith("+ Start") && !line.startsWith("+ End") && !line.includes("requests:")) {
+          findings.push({ msg: line.slice(2).trim() });
+        }
+      }
+      const serverMatch = out.match(/\+ Server: (.+)/);
+      return { ...base, findings, server: serverMatch?.[1] || null };
+    }
+    if (tool === "gobuster") {
+      const found_paths = [];
+      for (const line of out.split("\n")) {
+        const m = line.match(/^(\/\S+)\s+\(Status:\s*(\d+)\)(?:.*\[Size:\s*(\d+)\])?/);
+        if (m) found_paths.push({ path: m[1], status: parseInt(m[2]), size: m[3] ? parseInt(m[3]) : null });
+      }
+      return { ...base, found_paths };
+    }
+    if (tool === "sslscan") {
+      const issues = [];
+      if (/SSLv2|SSLv3|TLSv1\.0|TLSv1\.1/.test(out)) issues.push({ description: "Weak/deprecated protocol enabled" });
+      if (/RC4|DES|NULL|EXPORT|anon/.test(out))        issues.push({ description: "Weak cipher suite detected" });
+      if (/Self-signed/.test(out))                     issues.push({ description: "Self-signed certificate" });
+      if (/expired/i.test(out))                        issues.push({ description: "Certificate expired" });
+      const protocols = (out.match(/TLSv[\d.]+|SSLv[\d.]+/g) || []).filter((v,i,a)=>a.indexOf(v)===i);
+      const certSubj  = (out.match(/Subject:\s+(.+)/)||[])[1] || null;
+      const certIssue = (out.match(/Issuer:\s+(.+)/)||[])[1] || null;
+      const certExp   = (out.match(/Not valid after:\s+(.+)/)||[])[1] || null;
+      return { ...base, issues, supported_protocols: protocols,
+               certificate: certSubj ? { subject: certSubj, issuer: certIssue, expiry: certExp } : null };
+    }
+    if (tool === "sqlmap") {
+      const vulnerable = /is vulnerable|Parameter.*is vulnerable|sqlmap identified/i.test(out);
+      const params = (out.match(/Parameter: (\S+) \(/g)||[]).map(m=>m.replace(/Parameter: | \($/g,""));
+      return { ...base, vulnerable, injectable_params: params };
+    }
+    if (tool === "whatweb") {
+      const tech = {};
+      const m = out.match(/\[(.+?)\]/g) || [];
+      m.forEach(t => { const [k,...v]=t.slice(1,-1).split(" "); tech[k]=(v.join(" ")||"detected"); });
+      return { ...base, tech };
+    }
+    if (tool === "masscan") {
+      const open_ports = [];
+      for (const line of out.split("\n")) {
+        const m = line.match(/Discovered open port (\d+)\/(tcp|udp)/);
+        if (m) open_ports.push({ port: m[1], protocol: m[2], state: "open", service: "" });
+      }
+      return { ...base, open_ports };
+    }
+    if (tool === "dnsenum") {
+      const hostnames = (out.match(/^\S+\.\S+\s+\d+\s+IN\s+A\s+\S+/gm)||[]).map(l=>l.split(/\s+/)[0]);
+      return { ...base, hostnames };
+    }
+  } catch(e) {}
+  return base;
 }
 
 async function runKali(target, profile, selectedTools) {
-  // Run all selected Kali tools and aggregate results
   const tools = Array.isArray(selectedTools) && selectedTools.length
-    ? selectedTools
-    : ["nmap", "nikto", "sslscan", "whatweb"];
+    ? selectedTools : ["nmap", "nikto", "sslscan", "whatweb"];
 
+  const creds = await getKaliCreds();
   const results = {};
+
   for (const t of tools) {
     try {
-      const endpoint = `${KALI_AGENT_URL}/api/scan/${t}`;
-      const r = await axios.post(endpoint,
-        { target, profile: profile || "standard" },
-        { headers: kaliHeaders(), timeout: 570000 }
-      ).catch(() => null);
-      results[t] = r?.data || await runKaliTool(t, target, profile);
+      const tpl = KALI_CMDS[t];
+      if (!tpl) { results[t] = { tool:t, success:false, error:`Unknown tool: ${t}` }; continue; }
+      const cmd = (tpl[profile] || tpl.standard).replace(/\{t\}/g, target);
+      const timeoutMs = profile==="quick" ? 120000 : profile==="deep" ? 540000 : 300000;
+      const raw = await sshExec(creds, cmd, timeoutMs);
+      results[t] = parseKaliOutput(t, raw);
+      if (raw.timedOut) results[t].warning = "Command timed out — partial results";
     } catch(e) {
-      results[t] = { tool: t, success: false, error: e.message };
+      results[t] = { tool:t, success:false, error:e.message };
     }
   }
-  // Flatten into unified output
-  const summary = Object.entries(results).map(([t, r]) =>
-    `=== ${t.toUpperCase()} ===\n${(r.output || r.error || "no output").slice(0, 3000)}`
-  ).join("\n\n");
+
+  const summary = Object.entries(results)
+    .map(([t,r]) => `=== ${t.toUpperCase()} ===\n${(r.output || r.error || "no output").slice(0,3000)}`)
+    .join("\n\n");
+
   return {
     tool: "kali",
     success: Object.values(results).some(r => r.success !== false),
@@ -394,9 +519,10 @@ function buildReportHTML(job) {
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    // Also check Kali agent
-    const kaliOk = await axios.get(`${KALI_AGENT_URL}/health`, { timeout: 5000 })
-      .then(r => r.data?.ok).catch(() => false);
+    // Also check Kali SSH
+    const kaliCreds = await getKaliCreds();
+    const kaliOk = await sshExec(kaliCreds, "echo ok", 8000)
+      .then(r => r.stdout.includes("ok")).catch(() => false);
     // Also check ZAProxy
     const zapOk = await axios.get(`${ZAP_URL}/JSON/core/view/version/?apikey=${ZAP_API_KEY}`, { timeout: 5000 })
       .then(() => true).catch(() => false);
@@ -405,23 +531,33 @@ app.get("/health", async (req, res) => {
   } catch(e) { res.status(503).json({ ok: false, error: e.message }); }
 });
 
-/* ── Kali tool inventory ──────────────────────────────────────────────────── */
+/* ── Kali SSH tool list ───────────────────────────────────────────────────── */
 app.get("/api/vuln/kali/tools", requireAuth, async (req, res) => {
-  try {
-    const r = await axios.get(`${KALI_AGENT_URL}/api/tools`,
-      { headers: kaliHeaders(), timeout: 10000 });
-    res.json({ ok: true, tools: r.data });
-  } catch(e) {
-    res.json({ ok: false, error: "Kali agent unreachable: " + e.message, tools: {} });
+  const tools = {};
+  for (const [name, profiles] of Object.entries(KALI_CMDS)) {
+    tools[name] = { profiles: Object.keys(profiles), description: name };
   }
+  res.json({ ok: true, tools, mode: "ssh" });
 });
 
-/* ── Kali agent health proxy ─────────────────────────────────────────────── */
+/* ── Kali SSH health check ────────────────────────────────────────────────── */
 app.get("/api/vuln/kali/health", async (req, res) => {
   try {
-    const r = await axios.get(`${KALI_AGENT_URL}/health`, { timeout: 8000 });
-    // Wrap in { kali: {...} } so frontend can read d.kali?.ok
-    res.json({ kali: r.data, ok: true });
+    const creds = await getKaliCreds();
+    const result = await sshExec(creds, "echo ok && uname -a && which nmap nikto gobuster sslscan sqlmap 2>/dev/null | wc -l", 12000);
+    const toolCount = parseInt((result.stdout.match(/^(\d+)/m)||["0"])[0]);
+    const ok = result.stdout.includes("ok") && !result.timedOut;
+    const info = result.stdout.split("\n").filter(Boolean);
+    res.json({
+      kali: {
+        ok,
+        host: creds.host,
+        mode: "ssh",
+        uname: info[1] || null,
+        tools_available: toolCount || Object.keys(KALI_CMDS).length,
+      },
+      ok,
+    });
   } catch(e) {
     res.status(503).json({ kali: { ok: false }, ok: false, error: e.message });
   }

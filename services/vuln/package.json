@@ -1,7 +1,7 @@
 {
   "name": "secops-vuln-service",
   "version": "1.0.0",
-  "description": "Vulnerability Assessment microservice — Nmap, ZAProxy, Nessus, Qualys, Kali + Claude AI",
+  "description": "Vulnerability Assessment microservice \u2014 Nmap, ZAProxy, Nessus, Qualys, Kali + Claude AI",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -13,6 +13,7 @@
     "pg": "^8.11.3",
     "axios": "^1.6.2",
     "jsonwebtoken": "^9.0.2",
-    "cookie-parser": "^1.4.6"
+    "cookie-parser": "^1.4.6",
+    "ssh2": "^1.16.0"
   }
 }

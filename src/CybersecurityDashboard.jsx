@@ -3345,14 +3345,14 @@ function VulnAssessmentPage() {
               border: `1px solid ${kaliStatus==="ok" ? "#bbf7d0" : "#fecaca"}`,
               color: kaliStatus==="ok" ? "#15803d" : "#b91c1c" }}>
               <span>{kaliStatus==="ok" ? "🟢" : "🔴"}</span>
-              Kali Agent: {kaliStatus==="ok" ? "Online & Ready" : "Offline — check Docker"}
+              Kali SSH: {kaliStatus==="ok" ? "Connected to 192.168.101.6" : "Unreachable — check network/SSH"}
               <button onClick={checkKaliStatus} style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer", fontSize:12, color:"inherit" }}>↻</button>
             </div>
           )}
 
           <div style={{ marginBottom:10, padding:"8px 14px", borderRadius:8, fontSize:12, fontWeight:600, display:"flex", alignItems:"center", gap:8,
             background:"#fffbf0", border:"1px solid #fde68a", color:"#92400e" }}>
-            <span>🕷️</span> ZAProxy: Auto-deployed (ghcr.io/zaproxy/zaproxy:stable)
+            <span>🕷️</span> ZAProxy: Docker container (port 8080)
           </div>
 
           <Card style={{ padding:20, marginBottom:16 }}>
