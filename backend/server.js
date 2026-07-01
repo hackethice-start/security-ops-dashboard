@@ -59,20 +59,34 @@ async function saveSnapshot(tool, payload) {
 }
 
 /* ── Collectors ─────────────────────────────────────────────────────────── */
+async function collectFortinetInstance(inst) {
+  const base = (inst.host||"").replace(/\/$/, "");
+  if (!base) throw new Error("No host configured");
+  const headers = { Authorization: `Bearer ${inst.apikey}` };
+  const [mon, pol] = await Promise.all([
+    http.get(`${base}/api/v2/monitor/firewall/policy-list`, { headers }),
+    http.get(`${base}/api/v2/monitor/fortiview/statistics`, { headers }),
+  ]);
+  return { source:"fortinet", instance: inst.name||base, policies: mon.data?.results||[], stats: pol.data?.results||[] };
+}
+
 async function collectFortinet() {
   const c = await getCreds("fortinet");
   if (!c) return null;
   try {
-    const base = c.host.replace(/\/$/, "");
-    const headers = { Authorization: `Bearer ${c.apikey}` };
-    const [mon, pol] = await Promise.all([
-      http.get(`${base}/api/v2/monitor/firewall/policy-list`, { headers }),
-      http.get(`${base}/api/v2/monitor/fortiview/statistics`, { headers }),
-    ]);
-    const snap = { source:"fortinet", policies: mon.data?.results||[], stats: pol.data?.results||[] };
-    await saveSnapshot("fortinet", snap);
-    await setStatus("fortinet", "connected");
-    return snap;
+    // Support multi-instance: credentials.instances[]
+    const instances = c.instances || [c];
+    const results = [];
+    for (const inst of instances) {
+      try {
+        const snap = await collectFortinetInstance(inst);
+        await saveSnapshot("fortinet", snap);
+        results.push(snap);
+      } catch(e) { console.error(`Fortinet instance ${inst.name||inst.host} error:`, e.message); }
+    }
+    await setStatus("fortinet", results.length > 0 ? "connected" : "error",
+      results.length === 0 ? "All instances failed" : null);
+    return results;
   } catch(e) {
     await setStatus("fortinet", "error", e.message);
     return null;
@@ -115,34 +129,46 @@ async function collectUpGuard() {
   }
 }
 
+async function collectAzureInstance(inst) {
+  const tokenRes = await http.post(
+    `https://login.microsoftonline.com/${inst.tenantId}/oauth2/v2.0/token`,
+    new URLSearchParams({
+      client_id: inst.clientId, client_secret: inst.clientSecret,
+      grant_type: "client_credentials",
+      scope: "https://management.azure.com/.default",
+    }),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+  const token = tokenRes.data.access_token;
+  const sub = inst.subscriptionId;
+  const headers = { Authorization: `Bearer ${token}` };
+  const [alerts, secure] = await Promise.all([
+    http.get(`https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Security/alerts?api-version=2022-01-01`, { headers }),
+    http.get(`https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Security/secureScores?api-version=2020-01-01`, { headers }),
+  ]);
+  return {
+    source: "azure", instance: inst.name||inst.subscriptionId,
+    alerts: alerts.data?.value || [],
+    secureScore: secure.data?.value?.[0]?.properties || {},
+  };
+}
+
 async function collectAzure() {
   const c = await getCreds("azure");
   if (!c) return null;
   try {
-    const tokenRes = await http.post(
-      `https://login.microsoftonline.com/${c.tenantId}/oauth2/v2.0/token`,
-      new URLSearchParams({
-        client_id: c.clientId, client_secret: c.clientSecret,
-        grant_type: "client_credentials",
-        scope: "https://management.azure.com/.default",
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-    const token = tokenRes.data.access_token;
-    const sub = c.subscriptionId;
-    const headers = { Authorization: `Bearer ${token}` };
-    const [alerts, secure] = await Promise.all([
-      http.get(`https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Security/alerts?api-version=2022-01-01`, { headers }),
-      http.get(`https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Security/secureScores?api-version=2020-01-01`, { headers }),
-    ]);
-    const snap = {
-      source: "azure",
-      alerts: alerts.data?.value || [],
-      secureScore: secure.data?.value?.[0]?.properties || {},
-    };
-    await saveSnapshot("azure", snap);
-    await setStatus("azure", "connected");
-    return snap;
+    const instances = c.instances || [c];
+    const results = [];
+    for (const inst of instances) {
+      try {
+        const snap = await collectAzureInstance(inst);
+        await saveSnapshot("azure", snap);
+        results.push(snap);
+      } catch(e) { console.error(`Azure instance ${inst.name} error:`, e.message); }
+    }
+    await setStatus("azure", results.length > 0 ? "connected" : "error",
+      results.length === 0 ? "All instances failed" : null);
+    return results;
   } catch(e) {
     await setStatus("azure", "error", e.message);
     return null;
@@ -279,21 +305,74 @@ app.post("/api/integrations/:tool", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Test connection
+// Test connection (returns sample data for preview)
 app.post("/api/integrations/:tool/test", async (req, res) => {
   const { tool } = req.params;
-  const collectors = {
-    fortinet: collectFortinet, paloalto: collectPaloAlto, upguard: collectUpGuard,
-    azure: collectAzure, qualys: collectQualys, manageengine: collectManageEngine, taegis: collectTaegis,
-  };
-  if (!collectors[tool]) return res.status(404).json({ error: "Unknown tool" });
+  const { instance } = req.query; // optional instance index for multi-instance tools
+  const instanceIdx = instance !== undefined ? parseInt(instance) : null;
+
   try {
-    const result = await collectors[tool]();
-    if (result) {
-      res.json({ success: true, message: "Connection successful" });
+    const c = await getCreds(tool);
+    if (!c) return res.json({ success: false, error: "No credentials configured" });
+
+    // For multi-instance tools, test a specific instance if requested
+    let result = null;
+    let sample = null;
+
+    if (tool === "fortinet") {
+      const inst = instanceIdx !== null ? (c.instances||[c])[instanceIdx] : (c.instances||[c])[0];
+      if (!inst) return res.json({ success: false, error: "Instance not found" });
+      try {
+        result = await collectFortinetInstance(inst);
+        sample = { instance: inst.name, policies: result.policies?.length||0, message: "FortiGate API reachable" };
+        await setStatus("fortinet", "connected");
+      } catch(e) { return res.json({ success: false, error: e.message }); }
+
+    } else if (tool === "azure") {
+      const inst = instanceIdx !== null ? (c.instances||[c])[instanceIdx] : (c.instances||[c])[0];
+      if (!inst) return res.json({ success: false, error: "Instance not found" });
+      try {
+        result = await collectAzureInstance(inst);
+        sample = { instance: inst.name, alerts: result.alerts?.length||0, secureScore: result.secureScore?.score||"N/A" };
+        await setStatus("azure", "connected");
+      } catch(e) { return res.json({ success: false, error: e.message }); }
+
+    } else if (tool === "paloalto") {
+      result = await collectPaloAlto();
+      if (result) sample = { rules: result.rules?.length||0, message: "PAN-OS API reachable" };
+
+    } else if (tool === "upguard") {
+      result = await collectUpGuard();
+      if (result) {
+        const risks = result.risks?.risks||result.risks||{};
+        sample = {
+          score: risks.score||risks.security_score||"N/A",
+          risks_found: Array.isArray(risks.risks) ? risks.risks.length : "connected",
+          message: "UpGuard API reachable"
+        };
+      }
+
+    } else if (tool === "qualys") {
+      result = await collectQualys();
+      if (result) sample = { detections: typeof result.detections === "string" ? "XML data received" : result.detections?.length||0, message: "Qualys API reachable" };
+
+    } else if (tool === "manageengine") {
+      result = await collectManageEngine();
+      if (result) sample = { assets: result.assets?.total_count||"connected", message: "ManageEngine API reachable" };
+
+    } else if (tool === "taegis") {
+      result = await collectTaegis();
+      if (result) sample = { alerts: result.alerts?.length||0, message: "Taegis API reachable" };
+
+    } else {
+      return res.status(404).json({ error: "Unknown tool" });
+    }
+
+    if (result !== null) {
+      res.json({ success: true, message: "Connection successful", sample });
     } else {
       const row = await pool.query("SELECT last_error FROM integrations WHERE tool_name=$1", [tool]);
-      res.json({ success: false, error: row.rows[0]?.last_error || "No credentials configured" });
+      res.json({ success: false, error: row.rows[0]?.last_error || "Connection failed" });
     }
   } catch(e) { res.json({ success: false, error: e.message }); }
 });

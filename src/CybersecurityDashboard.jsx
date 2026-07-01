@@ -1103,13 +1103,28 @@ function SIEMPage({ data }) {
 /* ═══════════════════════════════════════════════════════════════════════════
    SETTINGS – INTEGRATIONS
 ═══════════════════════════════════════════════════════════════════════════ */
+
+// Tools that support multiple instances
+const MULTI_INSTANCE_TOOLS = ["fortinet", "azure"];
+
+const FIELDS = {
+  fortinet:     [["name","Instance Name","e.g. HQ Firewall"],["host","Host URL","https://192.168.1.1"],["apikey","API Key","FortiGate REST API token"]],
+  paloalto:     [["host","Host / Panorama URL","https://panorama.company.com"],["apikey","API Key","PAN-OS API key"]],
+  upguard:      [["apikey","API Key","UpGuard API key"],["subdomain","Subdomain (optional)","company"]],
+  azure:        [["name","Account Name","e.g. Production"],["tenantId","Tenant ID","xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],["clientId","Client ID",""],["clientSecret","Client Secret",""],["subscriptionId","Subscription ID",""]],
+  qualys:       [["username","Username","qualys-reader@company.com"],["password","Password",""],["platform","Platform URL","https://qualysapi.qualys.com"]],
+  manageengine: [["host","Server URL","https://meserver:8443"],["apikey","API Key","Zoho OAuth token"]],
+  taegis:       [["clientId","Client ID",""],["clientSecret","Client Secret",""],["region","Region","us1"]],
+};
+
 function IntegrationsPage({ onSave }) {
-  const [statuses, setStatuses] = useState({});
-  const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(null);
-  const [toast, setToast] = useState(null);
+  const [statuses,    setStatuses]    = useState({});
+  const [editing,     setEditing]     = useState(null);   // toolKey or "toolKey__idx"
+  const [form,        setForm]        = useState({});
+  const [saving,      setSaving]      = useState(false);
+  const [testing,     setTesting]     = useState(null);
+  const [testResults, setTestResults] = useState({});
+  const [toast,       setToast]       = useState(null);
 
   useEffect(() => { loadStatuses(); }, []);
 
@@ -1122,141 +1137,307 @@ function IntegrationsPage({ onSave }) {
         arr.forEach(x => { m[x.tool_name] = x; });
         setStatuses(m);
       }
-    } catch(e) {
-      console.error("Could not load integration statuses:", e);
-    }
+    } catch(e) { console.error("Could not load statuses:", e); }
   }
 
   function showToast(msg, ok=true) {
     setToast({msg, ok});
-    setTimeout(()=>setToast(null), 3000);
+    setTimeout(()=>setToast(null), 4000);
   }
 
-  const FIELDS = {
-    fortinet:     [["host","Host URL","https://192.168.1.1"],["apikey","API Key","FortiGate REST API token"]],
-    paloalto:     [["host","Host / Panorama URL","https://panorama.company.com"],["apikey","API Key","PAN-OS API key"]],
-    upguard:      [["apikey","API Key","UpGuard API key"],["subdomain","Subdomain","company"]],
-    azure:        [["tenantId","Tenant ID","xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],["clientId","Client ID",""],["clientSecret","Client Secret",""],["subscriptionId","Subscription ID",""]],
-    qualys:       [["username","Username","qualys-reader@company.com"],["password","Password",""],["platform","Platform URL","https://qualysapi.qualys.com"]],
-    manageengine: [["host","Server URL","https://meserver:8443"],["apikey","API Key","Zoho OAuth token"]],
-    taegis:       [["clientId","Client ID",""],["clientSecret","Client Secret",""],["region","Region","us1"]],
-  };
-
-  async function saveIntegration(toolKey) {
+  /* Save credentials (single or multi-instance) */
+  async function saveIntegration(toolKey, credentials, interval=300) {
     setSaving(true);
     try {
-      const payload = { credentials: form, refresh_interval: form._interval || 300 };
-      delete payload.credentials._interval;
       const r = await fetch(`${API}/api/integrations/${toolKey}`, {
-        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentials, refresh_interval: interval }),
       });
       if (r.ok) {
-        showToast("Credentials saved successfully");
+        showToast("Credentials saved successfully ✅");
         setEditing(null);
-        loadStatuses();
+        await loadStatuses();
         if (onSave) onSave();
       } else {
-        showToast("Failed to save credentials", false);
+        const err = await r.json().catch(()=>({}));
+        showToast(`Save failed: ${err.error || r.statusText}`, false);
       }
-    } catch(e) { showToast("Network error saving credentials", false); }
+    } catch(e) { showToast(`Network error: ${e.message}`, false); }
     setSaving(false);
   }
 
-  async function testConnection(toolKey) {
-    setTesting(toolKey);
+  /* Save single-tool form */
+  async function saveSingle(toolKey) {
+    const { _interval, ...creds } = form;  // extract interval, rest = credentials
+    await saveIntegration(toolKey, creds, _interval || 300);
+  }
+
+  /* Save one instance to the multi-instance list */
+  async function saveInstance(toolKey, idx) {
+    const st = statuses[toolKey] || {};
+    const existing = st.credentials?.instances || [];
+    const { _interval, ...instCreds } = form;
+    const updated = [...existing];
+    if (idx === -1) updated.push(instCreds);   // new instance
+    else updated[idx] = instCreds;              // edit existing
+    await saveIntegration(toolKey, { instances: updated }, _interval || 300);
+  }
+
+  async function deleteInstance(toolKey, idx) {
+    if (!confirm("Remove this instance?")) return;
+    const st = statuses[toolKey] || {};
+    const updated = (st.credentials?.instances || []).filter((_,i)=>i!==idx);
+    await saveIntegration(toolKey, { instances: updated });
+  }
+
+  /* Test connection and fetch sample data */
+  async function testConnection(toolKey, instanceIdx=null) {
+    const testKey = instanceIdx !== null ? `${toolKey}__${instanceIdx}` : toolKey;
+    setTesting(testKey);
     try {
-      const r = await fetch(`${API}/api/integrations/${toolKey}/test`, { method:"POST" });
+      const url = instanceIdx !== null
+        ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
+        : `${API}/api/integrations/${toolKey}/test`;
+      const r = await fetch(url, { method:"POST" });
       const data = await r.json();
-      showToast(data.success ? `${toolKey} connected successfully` : `Test failed: ${data.error}`, data.success);
+      setTestResults(prev => ({ ...prev, [testKey]: data }));
+      showToast(data.success ? "Connection successful ✅" : `Test failed: ${data.error}`, data.success);
       loadStatuses();
-    } catch(e) { showToast("Connection test failed", false); }
+    } catch(e) {
+      setTestResults(prev => ({ ...prev, [testKey]: { success:false, error:e.message } }));
+      showToast("Connection test failed", false);
+    }
     setTesting(null);
   }
 
   async function deleteIntegration(toolKey) {
-    if (!confirm(`Remove credentials for ${toolKey}?`)) return;
+    if (!confirm(`Remove all credentials for ${toolKey}?`)) return;
     await fetch(`${API}/api/integrations/${toolKey}`, { method:"DELETE" });
+    setTestResults(prev => { const n={...prev}; delete n[toolKey]; return n; });
     loadStatuses();
     showToast("Credentials removed");
   }
 
+  /* ── Single-instance form ─────────────────────────────────────────────── */
+  function SingleForm({ toolKey, tool }) {
+    return (
+      <div>
+        {(FIELDS[toolKey]||[]).map(([field, label, placeholder])=>(
+          <div key={field} style={{ marginBottom:12 }}>
+            <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>{label}</label>
+            <input
+              type={/pass|secret/i.test(field)?"password":/key|token/i.test(field)?"password":"text"}
+              value={form[field]||""}
+              onChange={e=>setForm(p=>({...p,[field]:e.target.value}))}
+              placeholder={placeholder}
+              style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none", boxSizing:"border-box" }}
+            />
+          </div>
+        ))}
+        <div style={{ marginBottom:14 }}>
+          <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>Refresh Interval</label>
+          <select value={form._interval||300} onChange={e=>setForm(p=>({...p,_interval:parseInt(e.target.value)}))}
+            style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, background:"white" }}>
+            {INTERVALS.map(i=><option key={i.value} value={i.value}>Every {i.label}</option>)}
+          </select>
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={()=>saveSingle(toolKey)} disabled={saving}
+            style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background:tool.color, color:"white", fontSize:13, fontWeight:700, cursor:"pointer" }}>
+            {saving?"Saving…":"💾 Save Credentials"}
+          </button>
+          <button onClick={()=>setEditing(null)}
+            style={{ padding:"9px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── Instance form (for multi-instance tools) ─────────────────────────── */
+  function InstanceForm({ toolKey, tool, idx }) {
+    return (
+      <div style={{ background:"#f8fafc", borderRadius:10, padding:16, marginTop:12, border:`1px solid ${C.border}` }}>
+        <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:12 }}>
+          {idx === -1 ? "➕ New Instance" : `✏️ Edit: ${form.name||"Instance"}`}
+        </div>
+        {(FIELDS[toolKey]||[]).map(([field, label, placeholder])=>(
+          <div key={field} style={{ marginBottom:10 }}>
+            <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:3, textTransform:"uppercase", letterSpacing:0.5 }}>{label}</label>
+            <input
+              type={/pass|secret/i.test(field)?"password":/key|token/i.test(field)?"password":"text"}
+              value={form[field]||""}
+              onChange={e=>setForm(p=>({...p,[field]:e.target.value}))}
+              placeholder={placeholder}
+              style={{ width:"100%", padding:"7px 11px", borderRadius:7, border:`1px solid ${C.border}`, fontSize:12, outline:"none", boxSizing:"border-box" }}
+            />
+          </div>
+        ))}
+        <div style={{ display:"flex", gap:8, marginTop:12 }}>
+          <button onClick={()=>saveInstance(toolKey, idx)} disabled={saving}
+            style={{ flex:1, padding:"8px 0", borderRadius:7, border:"none", background:tool.color, color:"white", fontSize:12, fontWeight:700, cursor:"pointer" }}>
+            {saving?"Saving…":"💾 Save Instance"}
+          </button>
+          <button onClick={()=>setEditing(null)}
+            style={{ padding:"8px 12px", borderRadius:7, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:12, cursor:"pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── Test result preview ──────────────────────────────────────────────── */
+  function TestResultPanel({ resultKey }) {
+    const r = testResults[resultKey];
+    if (!r) return null;
+    return (
+      <div style={{ marginTop:12, background:r.success?"#f0fdf4":"#fef2f2", borderRadius:8,
+        padding:12, border:`1px solid ${r.success?"#bbf7d0":"#fecaca"}` }}>
+        <div style={{ fontSize:12, fontWeight:700, color:r.success?C.ok:C.critical, marginBottom:r.sample?8:0 }}>
+          {r.success?"✅ Connected":"❌ Connection Failed"} {r.message||r.error||""}
+        </div>
+        {r.sample && (
+          <div style={{ fontSize:11, color:C.text, background:"white", borderRadius:6, padding:10, border:`1px solid ${C.border}`, fontFamily:"monospace", whiteSpace:"pre-wrap", maxHeight:120, overflow:"auto" }}>
+            {JSON.stringify(r.sample, null, 2)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ── Main render ──────────────────────────────────────────────────────── */
   return (
     <div>
-      <SectionTitle title="Integrations & Settings" subtitle="Connect and configure your security tools. Credentials are stored securely in the database." />
-      {toast&&(
-        <div style={{ position:"fixed", bottom:24, right:24, background:toast.ok?C.ok:C.critical, color:"white", padding:"12px 20px", borderRadius:10, fontSize:13, fontWeight:600, boxShadow:"0 4px 20px rgba(0,0,0,0.2)", zIndex:1000 }}>
-          {toast.ok?"✅":"❌"} {toast.msg}
+      <SectionTitle
+        title="Integrations & Settings"
+        subtitle="Connect your security tools. Credentials are stored securely in PostgreSQL — never in the browser."
+      />
+      {toast && (
+        <div style={{ position:"fixed", bottom:24, right:24, zIndex:1000, background:toast.ok?C.ok:C.critical,
+          color:"white", padding:"12px 20px", borderRadius:10, fontSize:13, fontWeight:600,
+          boxShadow:"0 4px 20px rgba(0,0,0,0.25)", maxWidth:320 }}>
+          {toast.msg}
         </div>
       )}
+
       <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:16 }}>
         {TOOLS.map(tool => {
-          const st = statuses[tool.key] || {};
-          const isConfigured = st.status && st.status !== "unconfigured";
-          const isConnected = st.status === "connected";
-          const isEditing = editing === tool.key;
+          const st       = statuses[tool.key] || {};
+          const isConn   = st.status === "connected";
+          const isConf   = st.status && st.status !== "unconfigured";
+          const isMulti  = MULTI_INSTANCE_TOOLS.includes(tool.key);
+          const instances= st.credentials?.instances || [];
+          const isEditing= editing === tool.key;
+
           return (
-            <Card key={tool.key} style={{ padding:24, border: isConnected ? `2px solid ${C.ok}30` : `2px solid ${C.border}` }}>
-              <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:16 }}>
-                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                  <div style={{ width:44, height:44, borderRadius:10, background:`${tool.color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:24 }}>{tool.icon}</div>
+            <Card key={tool.key} style={{ padding:24, border:`2px solid ${isConn?C.ok+"40":C.border}` }}>
+              {/* Header */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
+                <div style={{ display:"flex", gap:12, alignItems:"center" }}>
+                  <div style={{ width:44, height:44, borderRadius:10, background:`${tool.color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:24 }}>
+                    {tool.icon}
+                  </div>
                   <div>
                     <div style={{ fontSize:15, fontWeight:700, color:C.text }}>{tool.name}</div>
                     <div style={{ fontSize:11, color:C.muted }}>{tool.cat}</div>
+                    {isMulti && <div style={{ fontSize:10, color:tool.color, fontWeight:700, marginTop:2 }}>MULTI-INSTANCE</div>}
                   </div>
                 </div>
-                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                  <div style={{ width:8, height:8, borderRadius:"50%", background:isConnected?C.ok:isConfigured?C.warn:"#cbd5e1" }}/>
-                  <span style={{ fontSize:11, fontWeight:600, color:isConnected?C.ok:isConfigured?C.warn:C.muted }}>
-                    {isConnected?"Connected":isConfigured?`Status: ${st.status}`:"Not Configured"}
+                <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+                  <div style={{ width:8, height:8, borderRadius:"50%", background:isConn?C.ok:isConf?C.warn:"#cbd5e1" }}/>
+                  <span style={{ fontSize:11, fontWeight:600, color:isConn?C.ok:isConf?C.warn:C.muted }}>
+                    {isConn?"Connected":isConf?"Configured":"Not Configured"}
                   </span>
                 </div>
               </div>
 
-              {st.last_tested&&<div style={{ fontSize:11, color:C.muted, marginBottom:12 }}>Last tested: {new Date(st.last_tested).toLocaleString()}</div>}
-              {st.last_error&&<div style={{ fontSize:11, color:C.critical, marginBottom:12, background:"#fef2f2", padding:"6px 10px", borderRadius:6 }}>⚠️ {st.last_error}</div>}
+              {st.last_tested && <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>Last tested: {new Date(st.last_tested).toLocaleString()}</div>}
+              {st.last_error  && <div style={{ fontSize:11, color:C.critical, background:"#fef2f2", padding:"6px 10px", borderRadius:6, marginBottom:10 }}>⚠️ {st.last_error}</div>}
 
-              {isEditing ? (
+              {/* ── MULTI-INSTANCE (Fortinet / Azure) ──────────────────── */}
+              {isMulti ? (
                 <div>
-                  {(FIELDS[tool.key]||[]).map(([field, label, placeholder])=>(
-                    <div key={field} style={{ marginBottom:12 }}>
-                      <label style={{ display:"block", fontSize:12, fontWeight:600, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>{label}</label>
-                      <input type={field.toLowerCase().includes("pass")||field.toLowerCase().includes("secret")||field.toLowerCase().includes("key")?"password":"text"}
-                        value={form[field]||""} onChange={e=>setForm(p=>({...p,[field]:e.target.value}))}
-                        placeholder={placeholder}
-                        style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none", boxSizing:"border-box" }}/>
-                    </div>
-                  ))}
-                  <div style={{ marginBottom:12 }}>
-                    <label style={{ display:"block", fontSize:12, fontWeight:600, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>Refresh Interval</label>
-                    <select value={form._interval||300} onChange={e=>setForm(p=>({...p,_interval:parseInt(e.target.value)}))}
-                      style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, background:"white" }}>
-                      {INTERVALS.map(i=><option key={i.value} value={i.value}>Every {i.label}</option>)}
-                    </select>
-                  </div>
-                  <div style={{ display:"flex", gap:8 }}>
-                    <button onClick={()=>saveIntegration(tool.key)} disabled={saving}
-                      style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none", background:tool.color, color:"white", fontSize:13, fontWeight:700, cursor:"pointer" }}>
-                      {saving?"Saving…":"💾 Save"}
+                  {/* Instance list */}
+                  {instances.map((inst, idx) => {
+                    const instKey = `${tool.key}__${idx}`;
+                    return (
+                      <div key={idx}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 0", borderBottom:`1px solid ${C.border}` }}>
+                          <div style={{ flex:1 }}>
+                            <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{inst.name||`Instance ${idx+1}`}</div>
+                            <div style={{ fontSize:11, color:C.muted }}>{inst.host||inst.tenantId||""}</div>
+                          </div>
+                          <button onClick={()=>{ setEditing(instKey); setForm({...inst}); }}
+                            style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:11, cursor:"pointer" }}>✏️</button>
+                          <button onClick={()=>testConnection(tool.key, idx)} disabled={testing===instKey}
+                            style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${C.primaryLight}`, background:"white", color:C.primary, fontSize:11, cursor:"pointer", fontWeight:600 }}>
+                            {testing===instKey?"…":"🔗 Test"}
+                          </button>
+                          <button onClick={()=>deleteInstance(tool.key, idx)}
+                            style={{ padding:"4px 8px", borderRadius:6, border:`1px solid ${C.border}`, background:"white", color:C.critical, fontSize:11, cursor:"pointer" }}>🗑️</button>
+                        </div>
+                        <TestResultPanel resultKey={instKey}/>
+                      </div>
+                    );
+                  })}
+
+                  {/* Add instance button */}
+                  {editing !== `${tool.key}__-1` && (
+                    <button onClick={()=>{ setEditing(`${tool.key}__-1`); setForm({}); }}
+                      style={{ width:"100%", marginTop:12, padding:"8px 0", borderRadius:8, border:`2px dashed ${tool.color}60`,
+                        background:`${tool.color}08`, color:tool.color, fontSize:13, fontWeight:600, cursor:"pointer" }}>
+                      ➕ Add {tool.name} Instance
                     </button>
-                    <button onClick={()=>setEditing(null)} style={{ padding:"9px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"white", color:C.muted, fontSize:13, cursor:"pointer" }}>Cancel</button>
-                  </div>
+                  )}
+
+                  {/* Instance form */}
+                  {editing && editing.startsWith(`${tool.key}__`) && (
+                    <InstanceForm toolKey={tool.key} tool={tool} idx={parseInt(editing.split("__")[1])}/>
+                  )}
+
+                  {/* Refresh interval (stored globally for this tool) */}
+                  {instances.length > 0 && !isEditing && (
+                    <div style={{ marginTop:12, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                      <span style={{ fontSize:11, color:C.muted }}>Refresh interval:</span>
+                      <select value={st.refresh_interval||300}
+                        onChange={async e => {
+                          await saveIntegration(tool.key, st.credentials||{}, parseInt(e.target.value));
+                        }}
+                        style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${C.border}`, fontSize:12, background:"white" }}>
+                        {INTERVALS.map(i=><option key={i.value} value={i.value}>Every {i.label}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  <button onClick={()=>{ setEditing(tool.key); setForm({_interval:st.refresh_interval||300}); }}
-                    style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${tool.color}`, color:tool.color, background:`${tool.color}08`, fontSize:12, fontWeight:600, cursor:"pointer" }}>
-                    ✏️ {isConfigured?"Edit":"Configure"}
-                  </button>
-                  {isConfigured&&<>
-                    <button onClick={()=>testConnection(tool.key)} disabled={testing===tool.key}
-                      style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`, color:C.text, background:"white", fontSize:12, fontWeight:600, cursor:"pointer" }}>
-                      {testing===tool.key?"Testing…":"🔗 Test"}
-                    </button>
-                    <button onClick={()=>deleteIntegration(tool.key)}
-                      style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`, color:C.critical, background:"white", fontSize:12, cursor:"pointer" }}>
-                      🗑️
-                    </button>
-                  </>}
+                /* ── SINGLE-INSTANCE ──────────────────────────────────── */
+                <div>
+                  {isEditing ? (
+                    <SingleForm toolKey={tool.key} tool={tool}/>
+                  ) : (
+                    <div>
+                      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                        <button onClick={()=>{ setEditing(tool.key); setForm({_interval:st.refresh_interval||300}); }}
+                          style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${tool.color}`, color:tool.color, background:`${tool.color}08`, fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                          ✏️ {isConf?"Edit Credentials":"Configure"}
+                        </button>
+                        {isConf && <>
+                          <button onClick={()=>testConnection(tool.key)} disabled={testing===tool.key}
+                            style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${C.primaryLight}`, color:C.primary, background:"white", fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                            {testing===tool.key?"Testing…":"🔗 Test Connection"}
+                          </button>
+                          <button onClick={()=>deleteIntegration(tool.key)}
+                            style={{ padding:"7px 12px", borderRadius:8, border:`1px solid ${C.border}`, color:C.critical, background:"white", fontSize:12, cursor:"pointer" }}>
+                            🗑️
+                          </button>
+                        </>}
+                      </div>
+                      <TestResultPanel resultKey={tool.key}/>
+                    </div>
+                  )}
                 </div>
               )}
             </Card>
