@@ -148,6 +148,73 @@ function buildMock() {
         {time:"06:45",type:"Anomaly",severity:"Medium",desc:"Unusual data exfiltration volume",src:"10.3.2.11",status:"Investigating"},
       ],
     },
+    azure:{
+      secureScore:71, secureScoreMax:100,
+      subscriptions:[
+        {name:"Production",id:"sub-001",score:73,resources:142},
+        {name:"Development",id:"sub-002",score:64,resources:58},
+        {name:"DR / Backup",id:"sub-003",score:78,resources:22},
+      ],
+      byCategory:[
+        {cat:"Identity & Access",score:68,resources:24,issues:5,icon:"🔐"},
+        {cat:"Compute",score:72,resources:18,issues:4,icon:"💻"},
+        {cat:"Data & Storage",score:85,resources:12,issues:1,icon:"💾"},
+        {cat:"Network",score:74,resources:31,issues:3,icon:"🌐"},
+        {cat:"App Services",score:60,resources:6,issues:4,icon:"🌍"},
+        {cat:"Logging & Monitor",score:88,resources:8,issues:1,icon:"📊"},
+        {cat:"Key Vault",score:95,resources:2,issues:0,icon:"🔑"},
+      ],
+      virtualMachines:[
+        {name:"vm-prod-web-01",rg:"rg-production",os:"Windows Server 2022",size:"D4s_v3",status:"Running",patches:"Current",defender:"On",compliance:"Compliant",ip:"10.0.1.4"},
+        {name:"vm-prod-app-01",rg:"rg-production",os:"Ubuntu 22.04 LTS",size:"D8s_v3",status:"Running",patches:"Critical",defender:"On",compliance:"Non-Compliant",ip:"10.0.1.5"},
+        {name:"vm-prod-db-01",rg:"rg-production",os:"Windows Server 2019",size:"E8s_v3",status:"Running",patches:"Current",defender:"On",compliance:"Compliant",ip:"10.0.2.4"},
+        {name:"vm-prod-dc-01",rg:"rg-production",os:"Windows Server 2022",size:"D4s_v3",status:"Running",patches:"Current",defender:"On",compliance:"Compliant",ip:"10.0.0.4"},
+        {name:"vm-prod-backup",rg:"rg-backup",os:"Windows Server 2019",size:"D2s_v3",status:"Running",patches:"Warning",defender:"On",compliance:"Warning",ip:"10.0.3.4"},
+        {name:"vm-dev-build-01",rg:"rg-development",os:"Ubuntu 20.04 LTS",size:"B4ms",status:"Running",patches:"Warning",defender:"Off",compliance:"Non-Compliant",ip:"10.1.0.4"},
+        {name:"vm-dev-test-01",rg:"rg-development",os:"Windows Server 2019",size:"B2s",status:"Stopped",patches:"Critical",defender:"Off",compliance:"Non-Compliant",ip:"10.1.0.5"},
+        {name:"vm-dr-01",rg:"rg-dr",os:"Windows Server 2022",size:"D4s_v3",status:"Stopped (deallocated)",patches:"Current",defender:"On",compliance:"Compliant",ip:"10.2.0.4"},
+      ],
+      storageAccounts:[
+        {name:"stproddata001",rg:"rg-production",kind:"StorageV2",replication:"GRS",encryption:"Enabled",publicAccess:"Disabled",https:"Enforced",compliance:"Compliant"},
+        {name:"stprodlogs001",rg:"rg-production",kind:"StorageV2",replication:"LRS",encryption:"Enabled",publicAccess:"Disabled",https:"Enforced",compliance:"Compliant"},
+        {name:"stdevartifacts",rg:"rg-development",kind:"StorageV2",replication:"LRS",encryption:"Enabled",publicAccess:"Enabled",https:"Enforced",compliance:"Non-Compliant"},
+        {name:"stdrbackups001",rg:"rg-dr",kind:"StorageV2",replication:"GRS",encryption:"Enabled",publicAccess:"Disabled",https:"Enforced",compliance:"Compliant"},
+      ],
+      databases:[
+        {name:"sql-prod-main",type:"Azure SQL",rg:"rg-production",tde:"Enabled",audit:"Enabled",threat:"Enabled",firewall:"Configured",compliance:"Compliant"},
+        {name:"cosmos-prod-api",type:"Cosmos DB",rg:"rg-production",tde:"Enabled",audit:"Disabled",threat:"Enabled",firewall:"Open",compliance:"Warning"},
+        {name:"psql-dev-db",type:"PostgreSQL",rg:"rg-development",tde:"Enabled",audit:"Disabled",threat:"Disabled",firewall:"Open",compliance:"Non-Compliant"},
+      ],
+      webApps:[
+        {name:"app-portal-prod",rg:"rg-production",runtime:"Node 18",https:"Enforced",auth:"Azure AD",tls:"1.2+",compliance:"Compliant"},
+        {name:"app-api-prod",rg:"rg-production",runtime:"Python 3.11",https:"Enforced",auth:"None",tls:"1.0",compliance:"Non-Compliant"},
+        {name:"app-admin-prod",rg:"rg-production",runtime:".NET 8",https:"Enforced",auth:"Azure AD",tls:"1.2+",compliance:"Compliant"},
+        {name:"app-dev-portal",rg:"rg-development",runtime:"Node 18",https:"Not Enforced",auth:"None",tls:"1.0",compliance:"Non-Compliant"},
+        {name:"func-prod-proc",rg:"rg-production",runtime:"Python 3.11",https:"Enforced",auth:"MSI",tls:"1.2+",compliance:"Compliant"},
+      ],
+      keyVaults:[
+        {name:"kv-prod-secrets",rg:"rg-production",purge:"Enabled",soft:"90 days",rbac:"Enabled",compliance:"Compliant"},
+        {name:"kv-prod-certs",rg:"rg-production",purge:"Enabled",soft:"90 days",rbac:"Enabled",compliance:"Compliant"},
+      ],
+      recommendations:[
+        {severity:"High",title:"Enable MFA for all Azure AD administrator accounts",category:"Identity",affected:5,effort:"Low"},
+        {severity:"High",title:"Remediate JIT VM access on production VMs",category:"Compute",affected:4,effort:"Medium"},
+        {severity:"High",title:"Apply system updates on vm-prod-app-01 (critical patches missing)",category:"Compute",affected:1,effort:"Low"},
+        {severity:"High",title:"Restrict public network access to PostgreSQL server",category:"Data",affected:1,effort:"Low"},
+        {severity:"Medium",title:"Enable Azure Defender for open-source databases",category:"Data",affected:2,effort:"Low"},
+        {severity:"Medium",title:"Enable TLS 1.2+ on app-api-prod",category:"Network",affected:1,effort:"Low"},
+        {severity:"Medium",title:"Enable auditing on Cosmos DB and PostgreSQL",category:"Logging",affected:2,effort:"Medium"},
+        {severity:"Low",title:"Disable public blob access on stdevartifacts",category:"Storage",affected:1,effort:"Low"},
+        {severity:"Low",title:"Enable diagnostic logs on all App Services",category:"Logging",affected:4,effort:"Medium"},
+      ],
+      azureAlerts:[
+        {severity:"High",title:"Suspicious authentication from anonymous IP address",resource:"app-api-prod",time:"2 hr ago",status:"Active"},
+        {severity:"High",title:"Potential SQL injection attempt detected",resource:"sql-prod-main",time:"5 hr ago",status:"Investigating"},
+        {severity:"Medium",title:"Unusual outbound data transfer volume",resource:"stproddata001",time:"8 hr ago",status:"Active"},
+        {severity:"Medium",title:"VM without disk encryption detected",resource:"vm-dev-build-01",time:"1 day ago",status:"Open"},
+        {severity:"Low",title:"Storage account allows public blob access",resource:"stdevartifacts",time:"2 days ago",status:"Open"},
+      ],
+    },
   };
 }
 
@@ -564,72 +631,405 @@ function ThreatPage({ data }) {
   );
 }
 
-// ── Cloud Security ───────────────────────────────────────────────────────────
+// ── Cloud Security – Executive View ─────────────────────────────────────────
+function ComplianceDot({ status }) {
+  const cfg = {
+    Compliant:     ["#f0fdf4","#16a34a","✅"],
+    "Non-Compliant":["#fef2f2","#dc2626","❌"],
+    Warning:       ["#fffbeb","#d97706","⚠️"],
+    Enabled:       ["#f0fdf4","#16a34a","✓"],
+    Disabled:      ["#fef2f2","#dc2626","✗"],
+    On:            ["#f0fdf4","#16a34a","✓"],
+    Off:           ["#fef2f2","#dc2626","✗"],
+    Enforced:      ["#f0fdf4","#16a34a","✓"],
+    "Not Enforced":["#fef2f2","#dc2626","✗"],
+    Current:       ["#f0fdf4","#16a34a","✓"],
+    Critical:      ["#fef2f2","#dc2626","!"],
+  }[status] || ["#f1f5f9","#64748b","–"];
+  return (
+    <span style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", padding:"2px 8px",
+      borderRadius:12, background:cfg[0], color:cfg[1], fontSize:11, fontWeight:700 }}>
+      {cfg[2]} {status}
+    </span>
+  );
+}
+
 function CloudPage({ data }) {
-  const d = data || buildMock();
-  const cloudScore = 71;
-  const cloudItems = [
-    {cat:"Identity & Access",score:78,findings:3},{cat:"Data Protection",score:85,findings:1},
-    {cat:"Network Security",score:72,findings:5},{cat:"Compute Security",score:69,findings:6},
-    {cat:"Logging & Monitoring",score:88,findings:1},{cat:"App Security",score:63,findings:8},
-  ];
+  const d   = data || buildMock();
+  const az  = d.azure || buildMock().azure;
+  const score = az.secureScore || 71;
+  const totalResources = az.subscriptions?.reduce((s,x)=>s+x.resources,0) || 222;
+  const highRecs = az.recommendations?.filter(r=>r.severity==="High").length || 3;
+
+  const vmCompliant = az.virtualMachines?.filter(v=>v.compliance==="Compliant").length || 0;
+  const vmTotal     = az.virtualMachines?.length || 0;
+
   return (
     <div>
-      <SectionTitle title="Cloud Security – Azure" subtitle="Microsoft Defender for Cloud posture and recommendations" />
+      <SectionTitle title="Cloud Security – Microsoft Azure"
+        subtitle="Security posture, deployed assets and Defender for Cloud recommendations" />
+
+      {/* KPI row */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
-        <MetricCard icon="☁️" label="Secure Score" value={`${cloudScore}%`} sub="Azure Defender target: 85%" trendUp={false} color={C.primaryLight}/>
-        <MetricCard icon="⚠️" label="Recommendations" value="15" sub="7 high severity" trendUp={false} color={C.high}/>
-        <MetricCard icon="🔒" label="Protected Resources" value="94%" sub="206 of 219 resources" trendUp={true} color={C.ok}/>
-        <MetricCard icon="💡" label="Quick Wins" value="4" sub="Low effort, high impact" trendUp={true} color={C.primary}/>
+        <MetricCard icon="☁️" label="Secure Score" value={`${score}%`}
+          sub="Target: ≥85%" trendUp={false} color={score>=80?C.ok:C.warn}/>
+        <MetricCard icon="🖥️" label="Total Resources" value={totalResources}
+          sub={`Across ${az.subscriptions?.length||3} subscriptions`} color={C.primaryLight}/>
+        <MetricCard icon="⚠️" label="High Recommendations" value={highRecs}
+          sub="Require immediate attention" trendUp={false} color={C.high}/>
+        <MetricCard icon="✅" label="VM Compliance" value={`${vmTotal>0?Math.round(vmCompliant/vmTotal*100):0}%`}
+          sub={`${vmCompliant} of ${vmTotal} compliant`} trendUp={vmCompliant===vmTotal} color={C.ok}/>
       </div>
-      <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:16 }}>
-        <Card style={{ padding:24 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:20 }}>Security Controls by Category</div>
-          {cloudItems.map(c=>(
-            <div key={c.cat} style={{ marginBottom:16 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
-                <span style={{ fontSize:13, color:C.text, fontWeight:500 }}>{c.cat}</span>
-                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                  <span style={{ fontSize:11, color:C.muted }}>{c.findings} findings</span>
-                  <span style={{ fontSize:14, fontWeight:700, color:c.score>=80?C.ok:c.score>=70?C.warn:C.critical }}>{c.score}%</span>
+
+      {/* Subscriptions + score by category */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:16 }}>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Subscriptions Overview</div>
+          {az.subscriptions?.map(sub=>(
+            <div key={sub.id} style={{ marginBottom:16 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
+                <div>
+                  <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{sub.name}</div>
+                  <div style={{ fontSize:11, color:C.muted }}>{sub.resources} resources</div>
                 </div>
+                <span style={{ fontSize:18, fontWeight:800, color:sub.score>=80?C.ok:sub.score>=65?C.warn:C.critical }}>{sub.score}%</span>
               </div>
               <div style={{ height:8, background:"#f1f5f9", borderRadius:4 }}>
-                <div style={{ height:"100%", width:`${c.score}%`, background:`linear-gradient(90deg,${c.score>=80?C.ok:c.score>=70?C.warn:C.critical}bb,${c.score>=80?C.ok:c.score>=70?C.warn:C.critical})`, borderRadius:4 }}/>
+                <div style={{ height:"100%", width:`${sub.score}%`, borderRadius:4,
+                  background:`linear-gradient(90deg,${sub.score>=80?C.ok:sub.score>=65?C.warn:C.critical}99,${sub.score>=80?C.ok:sub.score>=65?C.warn:C.critical})` }}/>
               </div>
             </div>
           ))}
         </Card>
-        <Card style={{ padding:24 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Resource Coverage</div>
-          <ResponsiveContainer width="100%" height={200}>
-            <PieChart>
-              <Pie data={[{name:"Protected",value:94},{name:"Unprotected",value:6}]}
-                cx="50%" cy="50%" innerRadius={55} outerRadius={80}
-                paddingAngle={3} dataKey="value">
-                <Cell fill={C.ok}/><Cell fill="#f1f5f9"/>
-              </Pie>
-              <Tooltip contentStyle={{borderRadius:8,fontSize:12}}/>
-            </PieChart>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Security Score by Category</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={az.byCategory} layout="vertical" margin={{left:130,right:30,top:0,bottom:0}}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border} horizontal={false}/>
+              <XAxis type="number" domain={[0,100]} tick={{fontSize:10,fill:C.muted}} tickLine={false} axisLine={false}/>
+              <YAxis type="category" dataKey="cat" tick={{fontSize:11,fill:C.muted}} tickLine={false} axisLine={false} width={130}/>
+              <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12}}
+                formatter={(v)=>[`${v}%`,"Score"]}/>
+              <Bar dataKey="score" radius={[0,4,4,0]}>
+                {az.byCategory?.map((c,i)=><Cell key={i} fill={c.score>=80?C.ok:c.score>=65?C.warn:C.critical}/>)}
+              </Bar>
+            </BarChart>
           </ResponsiveContainer>
-          <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12 }}>
-            {[
-              {label:"Virtual Machines",total:45,prot:42},{label:"Storage Accounts",total:23,prot:23},
-              {label:"Databases",total:12,prot:11},{label:"App Services",total:18,prot:15},
-              {label:"Kubernetes",total:4,prot:3},
-            ].map(r=>(
-              <div key={r.label} style={{ display:"flex", justifyContent:"space-between", padding:"5px 0" }}>
-                <span style={{ fontSize:12, color:C.text }}>{r.label}</span>
-                <span style={{ fontSize:12, color:r.prot===r.total?C.ok:C.warn, fontWeight:600 }}>{r.prot}/{r.total}</span>
+        </Card>
+      </div>
+
+      {/* Asset inventory summary */}
+      <Card style={{ padding:20, marginBottom:16 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Deployed Asset Inventory – Summary</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12 }}>
+          {[
+            {icon:"🖥️",label:"Virtual Machines",count:az.virtualMachines?.length||0,
+              ok:az.virtualMachines?.filter(v=>v.compliance==="Compliant").length||0,color:"#3b82f6"},
+            {icon:"💾",label:"Storage Accounts",count:az.storageAccounts?.length||0,
+              ok:az.storageAccounts?.filter(v=>v.compliance==="Compliant").length||0,color:"#8b5cf6"},
+            {icon:"🗄️",label:"Databases",count:az.databases?.length||0,
+              ok:az.databases?.filter(v=>v.compliance==="Compliant").length||0,color:"#14b8a6"},
+            {icon:"🌍",label:"Web / Functions",count:az.webApps?.length||0,
+              ok:az.webApps?.filter(v=>v.compliance==="Compliant").length||0,color:"#f59e0b"},
+            {icon:"🔑",label:"Key Vaults",count:az.keyVaults?.length||0,
+              ok:az.keyVaults?.filter(v=>v.compliance==="Compliant").length||0,color:"#10b981"},
+          ].map(a=>(
+            <div key={a.label} style={{ background:"#f8fafc", borderRadius:10, padding:16, textAlign:"center", border:`1px solid ${C.border}` }}>
+              <div style={{ fontSize:28 }}>{a.icon}</div>
+              <div style={{ fontSize:26, fontWeight:800, color:C.text, lineHeight:1.2, marginTop:4 }}>{a.count}</div>
+              <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>{a.label}</div>
+              <div style={{ fontSize:11, fontWeight:700, color:a.ok===a.count?C.ok:C.warn, marginTop:4 }}>
+                {a.ok}/{a.count} Compliant
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Recommendations + Alerts */}
+      <div style={{ display:"grid", gridTemplateColumns:"3fr 2fr", gap:16 }}>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Top Security Recommendations</div>
+          {az.recommendations?.filter(r=>r.severity!=="Low").slice(0,6).map((r,i)=>(
+            <div key={i} style={{ display:"flex", gap:12, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+              <SeverityBadge level={r.severity}/>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, color:C.text, fontWeight:500 }}>{r.title}</div>
+                <div style={{ fontSize:11, color:C.muted, marginTop:2 }}>{r.category} • {r.affected} resource{r.affected!==1?"s":""} • Effort: {r.effort}</div>
+              </div>
+            </div>
+          ))}
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:16 }}>Azure Defender Alerts</div>
+          {az.azureAlerts?.map((a,i)=>(
+            <div key={i} style={{ padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+                <SeverityBadge level={a.severity}/>
+                <span style={{ fontSize:11, color:C.muted }}>{a.time}</span>
+              </div>
+              <div style={{ fontSize:12, color:C.text, fontWeight:500, marginTop:4 }}>{a.title}</div>
+              <div style={{ fontSize:11, color:C.muted }}>{a.resource}</div>
+            </div>
+          ))}
         </Card>
       </div>
     </div>
   );
 }
 
+// ── Cloud Security – Analyst View ─────────────────────────────────────────────
+function CloudAnalystPage({ data }) {
+  const d  = data || buildMock();
+  const az = d.azure || buildMock().azure;
+  const [tab,    setTab]    = useState("vms");
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("All");
+
+  const tabs = [
+    {id:"vms",    label:"Virtual Machines",  count:az.virtualMachines?.length},
+    {id:"storage",label:"Storage Accounts",  count:az.storageAccounts?.length},
+    {id:"db",     label:"Databases",         count:az.databases?.length},
+    {id:"apps",   label:"Web & Functions",   count:az.webApps?.length},
+    {id:"kv",     label:"Key Vaults",        count:az.keyVaults?.length},
+    {id:"recs",   label:"Recommendations",   count:az.recommendations?.length},
+  ];
+
+  function TableWrap({ headers, children }) {
+    return (
+      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+        <thead><tr style={{ background:"#f8fafc" }}>
+          {headers.map(h=>(
+            <th key={h} style={{ padding:"10px 12px", textAlign:"left", fontSize:11, fontWeight:700,
+              color:C.muted, textTransform:"uppercase", letterSpacing:0.5, borderBottom:`2px solid ${C.border}` }}>{h}</th>
+          ))}
+        </tr></thead>
+        <tbody>{children}</tbody>
+      </table>
+    );
+  }
+
+  const filterBar = (placeholder, filterOptions) => (
+    <div style={{ display:"flex", gap:10, marginBottom:16, alignItems:"center" }}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={placeholder}
+        style={{ flex:1, padding:"7px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none" }}/>
+      {filterOptions && (
+        <select value={filter} onChange={e=>setFilter(e.target.value)}
+          style={{ padding:"7px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, background:"white" }}>
+          {filterOptions.map(o=><option key={o}>{o}</option>)}
+        </select>
+      )}
+    </div>
+  );
+
+  function renderTab() {
+    const q = search.toLowerCase();
+
+    if (tab === "vms") {
+      const rows = (az.virtualMachines||[]).filter(v=>
+        (filter==="All"||v.compliance===filter) &&
+        (!q||v.name.toLowerCase().includes(q)||v.rg.toLowerCase().includes(q)||v.os.toLowerCase().includes(q))
+      );
+      return (
+        <div>
+          {filterBar("Search by name, resource group, OS…", ["All","Compliant","Non-Compliant","Warning"])}
+          <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>{rows.length} of {az.virtualMachines?.length} VMs shown</div>
+          <TableWrap headers={["VM Name","Resource Group","OS","Size","Status","Patches","Defender","Compliance"]}>
+            {rows.map((v,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}`, background:v.compliance==="Non-Compliant"?"#fef2f208":"transparent" }}>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:600, color:C.primary }}>{v.name}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{v.rg}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.text }}>{v.os}</td>
+                <td style={{ padding:"10px 12px", fontSize:11, fontFamily:"monospace", color:C.muted }}>{v.size}</td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:600, color:v.status==="Running"?C.ok:C.muted }}>{v.status}</span>
+                </td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.patches}/></td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.defender}/></td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.compliance}/></td>
+              </tr>
+            ))}
+          </TableWrap>
+        </div>
+      );
+    }
+
+    if (tab === "storage") {
+      const rows = (az.storageAccounts||[]).filter(v=>!q||v.name.toLowerCase().includes(q)||v.rg.toLowerCase().includes(q));
+      return (
+        <div>
+          {filterBar("Search storage accounts…")}
+          <TableWrap headers={["Account Name","Resource Group","Kind","Replication","Encryption","Public Access","HTTPS Only","Compliance"]}>
+            {rows.map((v,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:600, color:C.primary }}>{v.name}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{v.rg}</td>
+                <td style={{ padding:"10px 12px", fontSize:11, color:C.text }}>{v.kind}</td>
+                <td style={{ padding:"10px 12px", fontSize:11, color:C.text }}>{v.replication}</td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.encryption}/></td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:11,fontWeight:700,color:v.publicAccess==="Disabled"?C.ok:C.critical }}>{v.publicAccess}</span>
+                </td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.https}/></td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.compliance}/></td>
+              </tr>
+            ))}
+          </TableWrap>
+        </div>
+      );
+    }
+
+    if (tab === "db") {
+      const rows = (az.databases||[]).filter(v=>!q||v.name.toLowerCase().includes(q));
+      return (
+        <div>
+          {filterBar("Search databases…")}
+          <TableWrap headers={["Database","Type","Resource Group","Encryption (TDE)","Auditing","Threat Detect","Firewall","Compliance"]}>
+            {rows.map((v,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:600, color:C.primary }}>{v.name}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.text }}>{v.type}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{v.rg}</td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.tde}/></td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.audit}/></td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.threat}/></td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:700, color:v.firewall==="Configured"?C.ok:C.critical }}>{v.firewall}</span>
+                </td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.compliance}/></td>
+              </tr>
+            ))}
+          </TableWrap>
+        </div>
+      );
+    }
+
+    if (tab === "apps") {
+      const rows = (az.webApps||[]).filter(v=>!q||v.name.toLowerCase().includes(q)||v.rg.toLowerCase().includes(q));
+      return (
+        <div>
+          {filterBar("Search web apps & functions…")}
+          <TableWrap headers={["App Name","Resource Group","Runtime","HTTPS","Authentication","Min TLS","Compliance"]}>
+            {rows.map((v,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:600, color:C.primary }}>{v.name}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{v.rg}</td>
+                <td style={{ padding:"10px 12px", fontSize:11, color:C.text }}>{v.runtime}</td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.https}/></td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:12, color:v.auth==="None"?C.critical:C.ok, fontWeight:600 }}>{v.auth}</span>
+                </td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:700, color:v.tls==="1.0"?C.critical:C.ok }}>{v.tls}</span>
+                </td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.compliance}/></td>
+              </tr>
+            ))}
+          </TableWrap>
+        </div>
+      );
+    }
+
+    if (tab === "kv") {
+      const rows = (az.keyVaults||[]).filter(v=>!q||v.name.toLowerCase().includes(q));
+      return (
+        <div>
+          {filterBar("Search key vaults…")}
+          <TableWrap headers={["Key Vault","Resource Group","Purge Protection","Soft Delete","RBAC","Compliance"]}>
+            {rows.map((v,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:600, color:C.primary }}>{v.name}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{v.rg}</td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.purge}/></td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.text }}>{v.soft}</td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.rbac}/></td>
+                <td style={{ padding:"10px 12px" }}><ComplianceDot status={v.compliance}/></td>
+              </tr>
+            ))}
+          </TableWrap>
+        </div>
+      );
+    }
+
+    if (tab === "recs") {
+      const rows = (az.recommendations||[]).filter(r=>
+        (filter==="All"||r.severity===filter) &&
+        (!q||r.title.toLowerCase().includes(q)||r.category.toLowerCase().includes(q))
+      );
+      return (
+        <div>
+          {filterBar("Search recommendations…", ["All","High","Medium","Low"])}
+          <TableWrap headers={["Severity","Recommendation","Category","Affected Resources","Effort"]}>
+            {rows.map((r,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}>
+                <td style={{ padding:"10px 12px" }}><SeverityBadge level={r.severity}/></td>
+                <td style={{ padding:"10px 12px", fontSize:13, color:C.text }}>{r.title}</td>
+                <td style={{ padding:"10px 12px", fontSize:12, color:C.muted }}>{r.category}</td>
+                <td style={{ padding:"10px 12px", fontSize:13, fontWeight:700, color:C.text, textAlign:"center" }}>{r.affected}</td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ fontSize:11, fontWeight:600, padding:"3px 10px", borderRadius:20,
+                    background:r.effort==="Low"?"#f0fdf4":r.effort==="Medium"?"#fffbeb":"#fef2f2",
+                    color:r.effort==="Low"?C.ok:r.effort==="Medium"?C.warn:C.critical }}>{r.effort}</span>
+                </td>
+              </tr>
+            ))}
+          </TableWrap>
+        </div>
+      );
+    }
+  }
+
+  return (
+    <div>
+      <SectionTitle title="Cloud Security – Azure Asset Inventory"
+        subtitle="Complete inventory of all Azure deployed resources with security posture and compliance status" />
+
+      {/* Score + subscription tiles */}
+      <div style={{ display:"grid", gridTemplateColumns:"160px 1fr", gap:16, marginBottom:24 }}>
+        <Card style={{ padding:20, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+          <div style={{ fontSize:14, color:C.muted, marginBottom:4 }}>Secure Score</div>
+          <div style={{ fontSize:56, fontWeight:900, color:az.secureScore>=80?C.ok:az.secureScore>=65?C.warn:C.critical, lineHeight:1 }}>
+            {az.secureScore||71}
+          </div>
+          <div style={{ fontSize:13, color:C.muted }}>/ 100</div>
+        </Card>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+          {az.subscriptions?.map(sub=>(
+            <Card key={sub.id} style={{ padding:16 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:C.text }}>{sub.name}</div>
+              <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>{sub.resources} resources</div>
+              <div style={{ fontSize:24, fontWeight:800, color:sub.score>=80?C.ok:sub.score>=65?C.warn:C.critical }}>{sub.score}%</div>
+              <div style={{ height:5, background:"#f1f5f9", borderRadius:3, marginTop:6 }}>
+                <div style={{ height:"100%", width:`${sub.score}%`, background:sub.score>=80?C.ok:sub.score>=65?C.warn:C.critical, borderRadius:3 }}/>
+              </div>
+            </Card>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab navigation + content */}
+      <Card style={{ padding:0, overflow:"hidden" }}>
+        {/* Tabs */}
+        <div style={{ display:"flex", borderBottom:`2px solid ${C.border}`, background:"#f8fafc", overflowX:"auto" }}>
+          {tabs.map(t=>(
+            <button key={t.id} onClick={()=>{ setTab(t.id); setSearch(""); setFilter("All"); }}
+              style={{ padding:"12px 20px", border:"none", borderBottom:`2px solid ${tab===t.id?C.primary:"transparent"}`,
+                marginBottom:-2, background:"transparent", cursor:"pointer", whiteSpace:"nowrap",
+                color:tab===t.id?C.primary:C.muted, fontWeight:tab===t.id?700:400, fontSize:13,
+                display:"flex", alignItems:"center", gap:6 }}>
+              {t.label}
+              <span style={{ background:tab===t.id?C.primary:C.border, color:tab===t.id?"white":C.muted,
+                borderRadius:10, padding:"1px 7px", fontSize:10, fontWeight:700 }}>{t.count}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ padding:20 }}>{renderTab()}</div>
+      </Card>
+    </div>
+  );
+}
+
+// ── Executive Report ─────────────────────────────────────────────────────────
 // ── Executive Report ─────────────────────────────────────────────────────────
 function ReportPage({ data }) {
   const d = data || buildMock();
@@ -1467,12 +1867,13 @@ export default function CybersecurityDashboard() {
     { id:"report",   icon:"📊", label:"Executive Report" },
   ];
   const analystNav = [
-    { id:"alerts",  icon:"🚨", label:"Alert Queue" },
-    { id:"vulns",   icon:"🔍", label:"Vulnerabilities" },
-    { id:"firewall",icon:"🔥", label:"Firewall Analytics" },
-    { id:"surface", icon:"🌐", label:"Attack Surface" },
-    { id:"assets",  icon:"💻", label:"Assets & Patches" },
-    { id:"siem",    icon:"📡", label:"SIEM / XDR" },
+    { id:"alerts",     icon:"🚨", label:"Alert Queue" },
+    { id:"vulns",      icon:"🔍", label:"Vulnerabilities" },
+    { id:"firewall",   icon:"🔥", label:"Firewall Analytics" },
+    { id:"surface",    icon:"🌐", label:"Attack Surface" },
+    { id:"assets",     icon:"💻", label:"Assets & Patches" },
+    { id:"cloudanalyst",icon:"☁️",label:"Cloud Security" },
+    { id:"siem",       icon:"📡", label:"SIEM / XDR" },
   ];
   const nav = role === "executive" ? execNav : analystNav;
 
@@ -1511,9 +1912,10 @@ export default function CybersecurityDashboard() {
       case "alerts":   return <AlertsPage {...p}/>;
       case "vulns":    return <VulnerabilitiesPage {...p}/>;
       case "firewall": return <FirewallPage {...p}/>;
-      case "surface":  return <AttackSurfacePage {...p}/>;
-      case "assets":   return <AssetsPage {...p}/>;
-      case "siem":     return <SIEMPage {...p}/>;
+      case "surface":      return <AttackSurfacePage {...p}/>;
+      case "assets":       return <AssetsPage {...p}/>;
+      case "cloudanalyst": return <CloudAnalystPage {...p}/>;
+      case "siem":         return <SIEMPage {...p}/>;
       case "settings": return <IntegrationsPage onSave={loadData}/>;
       default:         return <OverviewPage {...p}/>;
     }
