@@ -1832,9 +1832,8 @@ function AdminPage({ user, onLogout }) {
       const url = instanceIdx !== null
         ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
         : `${API}/api/integrations/${toolKey}/test`;
-      const r = await fetch(url, {
+      const r = await apiFetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: "{}",
         signal: ctrl.signal,
       });
@@ -2356,9 +2355,8 @@ function IntegrationsPage({ onSave }) {
       const url = instanceIdx !== null
         ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
         : `${API}/api/integrations/${toolKey}/test`;
-      const r = await fetch(url, {
+      const r = await apiFetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: "{}",
         signal: ctrl.signal,
       });
@@ -2395,20 +2393,29 @@ function IntegrationsPage({ onSave }) {
 
   /* ── Single-instance form ─────────────────────────────────────────────── */
   function SingleForm({ toolKey, tool }) {
+    const isExisting = !!(statuses[toolKey]?.safe_credentials || statuses[toolKey]?.status === "configured" || statuses[toolKey]?.status === "ok" || statuses[toolKey]?.status === "error");
     return (
       <div>
-        {(FIELDS[toolKey]||[]).map(([field, label, placeholder])=>(
+        {(FIELDS[toolKey]||[]).map(([field, label, placeholder])=>{
+          const isSecret = /pass|secret/i.test(field) || /key|token/i.test(field);
+          const effectivePlaceholder = isSecret && isExisting
+            ? "Leave blank to keep current value"
+            : placeholder;
+          return (
           <div key={field} style={{ marginBottom:12 }}>
             <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>{label}</label>
             <input
-              type={/pass|secret/i.test(field)?"password":/key|token/i.test(field)?"password":"text"}
+              type={isSecret?"password":"text"}
               value={form[field]||""}
               onChange={e=>setForm(p=>({...p,[field]:e.target.value}))}
-              placeholder={placeholder}
+              placeholder={effectivePlaceholder}
               style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:`1px solid ${C.border}`, fontSize:13, outline:"none", boxSizing:"border-box" }}
             />
+            {isSecret && isExisting && !form[field] && (
+              <div style={{ fontSize:10, color:C.muted, marginTop:2, fontStyle:"italic" }}>🔒 Saved value will be kept</div>
+            )}
           </div>
-        ))}
+        )})}
         <div style={{ marginBottom:14 }}>
           <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>Refresh Interval</label>
           <select value={form._interval||300} onChange={e=>setForm(p=>({...p,_interval:parseInt(e.target.value)}))}
@@ -2438,23 +2445,32 @@ function IntegrationsPage({ onSave }) {
 
   /* ── Instance form (for multi-instance tools) ─────────────────────────── */
   function InstanceForm({ toolKey, tool, idx }) {
+    const isExistingInst = idx >= 0;
     return (
       <div style={{ background:"#f8fafc", borderRadius:10, padding:16, marginTop:12, border:`1px solid ${C.border}` }}>
         <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:12 }}>
           {idx === -1 ? "➕ New Instance" : `✏️ Edit: ${form.name||"Instance"}`}
         </div>
-        {(FIELDS[toolKey]||[]).map(([field, label, placeholder])=>(
+        {(FIELDS[toolKey]||[]).map(([field, label, placeholder])=>{
+          const isSecret = /pass|secret/i.test(field) || /key|token/i.test(field);
+          const effectivePlaceholder = isSecret && isExistingInst
+            ? "Leave blank to keep current value"
+            : placeholder;
+          return (
           <div key={field} style={{ marginBottom:10 }}>
             <label style={{ display:"block", fontSize:11, fontWeight:700, color:C.muted, marginBottom:3, textTransform:"uppercase", letterSpacing:0.5 }}>{label}</label>
             <input
-              type={/pass|secret/i.test(field)?"password":/key|token/i.test(field)?"password":"text"}
+              type={isSecret?"password":"text"}
               value={form[field]||""}
               onChange={e=>setForm(p=>({...p,[field]:e.target.value}))}
-              placeholder={placeholder}
+              placeholder={effectivePlaceholder}
               style={{ width:"100%", padding:"7px 11px", borderRadius:7, border:`1px solid ${C.border}`, fontSize:12, outline:"none", boxSizing:"border-box" }}
             />
+            {isSecret && isExistingInst && !form[field] && (
+              <div style={{ fontSize:10, color:C.muted, marginTop:2, fontStyle:"italic" }}>🔒 Saved value will be kept</div>
+            )}
           </div>
-        ))}
+        )})}
         <div style={{ display:"flex", gap:8, marginTop:12 }}>
           <button onClick={()=>saveInstance(toolKey, idx)} disabled={saving}
             style={{ flex:1, padding:"8px 0", borderRadius:7, border:"none", background:tool.color, color:"white", fontSize:12, fontWeight:700, cursor:"pointer" }}>
@@ -2601,7 +2617,7 @@ function IntegrationsPage({ onSave }) {
                   ) : (
                     <div>
                       <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                        <button onClick={()=>{ setEditing(tool.key); setForm({_interval:st.refresh_interval||300}); }}
+                        <button onClick={()=>{ setEditing(tool.key); setForm({_interval:st.refresh_interval||300, ...(st.safe_credentials||{})}); }}
                           style={{ padding:"7px 14px", borderRadius:8, border:`1px solid ${tool.color}`, color:tool.color, background:`${tool.color}08`, fontSize:12, fontWeight:600, cursor:"pointer" }}>
                           ✏️ {isConf?"Edit Credentials":"Configure"}
                         </button>

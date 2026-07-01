@@ -551,9 +551,22 @@ app.get("/api/integrations", requireAuth, async (req, res) => {
     const r = await pool.query(
       "SELECT tool_name, enabled, status, last_tested, last_error, refresh_interval, updated_at, credentials FROM integrations ORDER BY tool_name"
     );
+    // Non-secret fields safe to return for form pre-population
+    const SAFE_FIELDS = {
+      fortinet:     ["name","host"],
+      paloalto:     ["host"],
+      upguard:      [],
+      azure:        ["name","tenantId","subscriptionId","clientId"],
+      qualys:       ["platform","username"],
+      manageengine: ["host"],
+      taegis:       ["clientId","region"],
+    };
     const rows = r.rows.map(row => {
       const creds = row.credentials || {};
       const rawInstances = Array.isArray(creds.instances) ? creds.instances : null;
+      const safeFields = SAFE_FIELDS[row.tool_name] || [];
+      const safe_credentials = {};
+      safeFields.forEach(f => { if (creds[f]) safe_credentials[f] = creds[f]; });
       return {
         tool_name:        row.tool_name,
         enabled:          row.enabled,
@@ -562,11 +575,17 @@ app.get("/api/integrations", requireAuth, async (req, res) => {
         last_error:       row.last_error,
         refresh_interval: row.refresh_interval,
         updated_at:       row.updated_at,
+        safe_credentials,   // non-secret fields for form pre-population
         instance_count:   rawInstances ? rawInstances.length : 0,
         instances: rawInstances
           ? rawInstances.map(inst => ({
               name: inst.name || "",
               host: inst.host || inst.tenantId || inst.subscriptionId || "",
+              // safe fields for multi-instance edit
+              tenantId: inst.tenantId || "",
+              subscriptionId: inst.subscriptionId || "",
+              clientId: inst.clientId || "",
+              region: inst.region || "",
             }))
           : null,
       };
@@ -579,16 +598,55 @@ app.get("/api/integrations", requireAuth, async (req, res) => {
 });
 
 // Save credentials
+// Secret credential fields per tool — never returned in GET responses
+const SECRET_FIELDS = {
+  fortinet:     ["password"],
+  paloalto:     ["password"],
+  upguard:      ["apikey"],
+  azure:        ["clientSecret"],
+  qualys:       ["password"],
+  manageengine: ["password"],
+  taegis:       ["clientSecret"],
+};
+
 app.post("/api/integrations/:tool", requireAuth, async (req, res) => {
   const { tool } = req.params;
   const { credentials, refresh_interval } = req.body;
   try {
+    // Merge: keep existing secrets if new value is blank/missing
+    let mergedCreds = credentials || {};
+    const secretFields = SECRET_FIELDS[tool] || [];
+    if (secretFields.length > 0) {
+      const existing = await pool.query(
+        "SELECT credentials FROM integrations WHERE tool_name=$1", [tool]
+      );
+      if (existing.rows.length > 0) {
+        const existingCreds = existing.rows[0].credentials || {};
+        secretFields.forEach(f => {
+          if (!mergedCreds[f] || mergedCreds[f] === "") {
+            if (existingCreds[f]) mergedCreds[f] = existingCreds[f];
+          }
+        });
+        // Also merge instance-level secrets for multi-instance tools
+        if (Array.isArray(mergedCreds.instances) && Array.isArray(existingCreds.instances)) {
+          mergedCreds.instances = mergedCreds.instances.map((inst, i) => {
+            const existInst = existingCreds.instances[i] || {};
+            secretFields.forEach(f => {
+              if (!inst[f] || inst[f] === "") {
+                if (existInst[f]) inst[f] = existInst[f];
+              }
+            });
+            return inst;
+          });
+        }
+      }
+    }
     await pool.query(
       `INSERT INTO integrations (tool_name, credentials, refresh_interval, status, updated_at)
        VALUES ($1,$2,$3,'configured',NOW())
        ON CONFLICT (tool_name) DO UPDATE
        SET credentials=$2, refresh_interval=$3, status='configured', updated_at=NOW()`,
-      [tool, JSON.stringify(credentials||{}), refresh_interval||300]
+      [tool, JSON.stringify(mergedCreds), refresh_interval||300]
     );
     // Reschedule collectors to pick up new interval
     scheduleCollectors().catch(console.error);
