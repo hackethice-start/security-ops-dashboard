@@ -7,6 +7,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:80"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     depends_on:
       backend:
         condition: service_started
@@ -23,6 +27,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "4000:4000"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     environment:
       - POSTGRES_HOST=db
       - POSTGRES_DB=${POSTGRES_DB:-secops}
@@ -43,6 +51,9 @@ services:
 
   db:
     image: postgres:16-alpine
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-secops}
       - POSTGRES_USER=${POSTGRES_USER:-secops}
