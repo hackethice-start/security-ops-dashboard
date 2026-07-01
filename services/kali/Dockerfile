@@ -39,7 +39,7 @@ RUN test -f /usr/share/wordlists/rockyou.txt.gz \
 
 # ── Install Python agent dependencies ─────────────────────────────────────────
 COPY requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed -r /app/requirements.txt
 
 # ── Copy scan agent ────────────────────────────────────────────────────────────
 COPY agent.py /app/agent.py
