@@ -1,11 +1,9 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, LineChart, Line, Legend } from 'recharts';
+
 // CybersecurityDashboard.jsx
 // Production-ready SecOps Command Center — single-file React 18 + Recharts
 
-const { useState, useEffect, useCallback, useMemo } = React;
-const {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, AreaChart, Area, LineChart, Line, Legend,
-} = Recharts;
 
 /* ── Colour tokens ─────────────────────────────────────────────────────── */
 const C = {
