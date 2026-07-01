@@ -77,6 +77,8 @@ jobs:
           cp index.html /opt/secops/index.html
           cp package.json /opt/secops/package.json
           cp vite.config.js /opt/secops/vite.config.js
+          cp tailwind.config.js /opt/secops/tailwind.config.js
+          cp postcss.config.js /opt/secops/postcss.config.js
           cp -r src /opt/secops/src
           cp -r public /opt/secops/public
           cp -r backend /opt/secops/backend
