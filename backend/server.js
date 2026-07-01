@@ -163,7 +163,7 @@ async function collectFortinetInstance(inst) {
     ? { Authorization: `Bearer ${inst.apikey}` }
     : { Authorization: `Bearer ${inst.password}` };
 
-  const [cmdbPolicies, monPolicies, interfaces, sysInfo, addrGroups] = await Promise.all([
+  const [cmdbPolicies, monPolicies, interfaces, sysInfo, addrGroups, topAppsRes, topWebRes] = await Promise.all([
     // CMDB: full policy config (name, action, srcaddr, dstaddr, service, logtraffic, status)
     http.get(`${base}/api/v2/cmdb/firewall/policy`, { headers })
       .catch(() => ({ data: {} })),
@@ -179,13 +179,25 @@ async function collectFortinetInstance(inst) {
     // CMDB: firewall address groups (for CIS check on any/all rules)
     http.get(`${base}/api/v2/cmdb/firewall/addrgrp`, { headers })
       .catch(() => ({ data: {} })),
+    // FortiView: top applications by session count (requires app-ctrl license)
+    http.get(`${base}/api/v2/monitor/fortiview/statistics`, {
+      headers, params: { filter: 'app-ctrl', count: 10, 'sort-by': 'sessions', order: 'desc' }
+    }).catch(() => ({ data: {} })),
+    // FortiView: top web categories by session count (requires web filter license)
+    http.get(`${base}/api/v2/monitor/fortiview/statistics`, {
+      headers, params: { filter: 'web', count: 10, 'sort-by': 'sessions', order: 'desc' }
+    }).catch(() => ({ data: {} })),
   ]);
 
   const policies   = cmdbPolicies.data?.results || cmdbPolicies.data?.result || [];
   const stats      = monPolicies.data?.results  || monPolicies.data?.result  || [];
-  const ifaces     = interfaces.data?.results   || interfaces.data?.result   || [];
+  // FortiGate /monitor/system/interface returns either an array or an object keyed by name
+  const ifaceRaw   = interfaces.data?.results   || interfaces.data?.result   || {};
+  const ifaces     = Array.isArray(ifaceRaw) ? ifaceRaw : Object.values(ifaceRaw);
   const sysGlobal  = sysInfo.data?.results?.[0] || sysInfo.data?.result?.[0] || {};
   const addrgrps   = addrGroups.data?.results   || addrGroups.data?.result   || [];
+  const topApps    = topAppsRes.data?.results   || topAppsRes.data?.result   || [];
+  const topWeb     = topWebRes.data?.results    || topWebRes.data?.result    || [];
 
   return {
     source: "fortinet",
@@ -197,6 +209,8 @@ async function collectFortinetInstance(inst) {
     interfaces: ifaces,
     sysGlobal,
     addrgrps,
+    topApps,
+    topWeb,
     collectedAt: new Date().toISOString(),
   };
 }

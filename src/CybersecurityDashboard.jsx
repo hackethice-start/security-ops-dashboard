@@ -187,6 +187,17 @@ function transformSnapshot(snap) {
       bandwidth,
       cisBenchmark,
       collectedAt: snap.collectedAt,
+      topApps: (snap.topApps||[]).slice(0,10).map(a=>({
+        name:    a.app||a.application||a.name||"Unknown",
+        sessions:a.sessions||a.count||0,
+        bytes:   a.bandwidth||a.bytes||0,
+        risk:    a.risk||"low",
+      })),
+      topWebCategories: (snap.topWeb||[]).slice(0,10).map(w=>({
+        name:    w.category||w.web_category||w.name||"Unknown",
+        sessions:w.sessions||w.count||0,
+        bytes:   w.bandwidth||w.bytes||0,
+      })),
     };
   }
 
@@ -2269,6 +2280,125 @@ function FirewallPage({ data }) {
                 ))}</tbody>
               </table>
             </Card>
+
+            {/* ── Top 10 Applications ── */}
+            {(() => {
+              const apps = fw.topApps || [];
+              const maxSess = apps[0]?.sessions || 1;
+              const RISK_COLOR = { critical:"#dc2626", high:"#f97316", medium:"#f59e0b", low:"#22c55e", unknown:"#94a3b8" };
+              return (
+                <Card style={{ padding:20 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+                    <div style={{ fontSize:14, fontWeight:700, color:C.text }}>🔢 Top 10 Applications</div>
+                    {apps.length===0 && <span style={{ fontSize:11, color:C.muted }}>Requires App Control license</span>}
+                  </div>
+                  {apps.length === 0 ? (
+                    <div style={{ textAlign:"center", padding:"24px 0", color:C.muted }}>
+                      <div style={{ fontSize:28, marginBottom:8 }}>📡</div>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:4 }}>No application data</div>
+                      <div style={{ fontSize:12 }}>Enable FortiGuard App Control &amp; re-collect data</div>
+                    </div>
+                  ) : apps.map((a,i) => (
+                    <div key={i} style={{ marginBottom:10 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                          <span style={{ fontSize:11, fontWeight:700, color:C.muted, width:18 }}>{i+1}</span>
+                          <span style={{ fontSize:13, fontWeight:600, color:C.text }}>{a.name}</span>
+                          <span style={{ fontSize:10, fontWeight:700, padding:"1px 6px", borderRadius:6,
+                            background:(RISK_COLOR[a.risk]||"#94a3b8")+"20",
+                            color:RISK_COLOR[a.risk]||"#94a3b8" }}>{a.risk||"low"}</span>
+                        </div>
+                        <div style={{ fontSize:12, color:C.muted, textAlign:"right" }}>
+                          <span style={{ fontWeight:700, color:C.text }}>{a.sessions.toLocaleString()}</span> sessions
+                          {a.bytes>0 && <span style={{ marginLeft:8, color:C.muted }}>{(a.bytes/1024/1024).toFixed(1)} MB</span>}
+                        </div>
+                      </div>
+                      <div style={{ height:6, background:C.border, borderRadius:3, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${Math.round((a.sessions/maxSess)*100)}%`,
+                          background: RISK_COLOR[a.risk]||C.primary, borderRadius:3, transition:"width 0.4s" }}/>
+                      </div>
+                    </div>
+                  ))}
+                </Card>
+              );
+            })()}
+
+            {/* ── Top 10 Web Categories ── */}
+            {(() => {
+              const cats = fw.topWebCategories || [];
+              const maxSess = cats[0]?.sessions || 1;
+              const CAT_COLORS = ["#6366f1","#8b5cf6","#ec4899","#f97316","#f59e0b","#22c55e","#14b8a6","#0ea5e9","#3b82f6","#a78bfa"];
+              return (
+                <Card style={{ padding:20 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+                    <div style={{ fontSize:14, fontWeight:700, color:C.text }}>🌐 Top 10 Web Categories</div>
+                    {cats.length===0 && <span style={{ fontSize:11, color:C.muted }}>Requires Web Filter license</span>}
+                  </div>
+                  {cats.length === 0 ? (
+                    <div style={{ textAlign:"center", padding:"24px 0", color:C.muted }}>
+                      <div style={{ fontSize:28, marginBottom:8 }}>🌍</div>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:4 }}>No web category data</div>
+                      <div style={{ fontSize:12 }}>Enable FortiGuard Web Filter &amp; re-collect data</div>
+                    </div>
+                  ) : cats.map((c,i) => (
+                    <div key={i} style={{ marginBottom:10 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:3 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                          <span style={{ fontSize:11, fontWeight:700, color:C.muted, width:18 }}>{i+1}</span>
+                          <span style={{ fontSize:13, fontWeight:600, color:C.text }}>{c.name}</span>
+                        </div>
+                        <div style={{ fontSize:12, color:C.muted, textAlign:"right" }}>
+                          <span style={{ fontWeight:700, color:C.text }}>{c.sessions.toLocaleString()}</span> sessions
+                          {c.bytes>0 && <span style={{ marginLeft:8 }}>{(c.bytes/1024/1024).toFixed(1)} MB</span>}
+                        </div>
+                      </div>
+                      <div style={{ height:6, background:C.border, borderRadius:3, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${Math.round((c.sessions/maxSess)*100)}%`,
+                          background:CAT_COLORS[i%CAT_COLORS.length], borderRadius:3, transition:"width 0.4s" }}/>
+                      </div>
+                    </div>
+                  ))}
+                </Card>
+              );
+            })()}
+
+            {/* ── Bandwidth Utilization (quick view) ── */}
+            {bandwidth.length > 0 && (
+              <Card style={{ padding:20, gridColumn:"1/-1" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+                  <div style={{ fontSize:14, fontWeight:700, color:C.text }}>📶 Bandwidth Utilization</div>
+                  <button onClick={()=>setTab("bandwidth")} style={{ fontSize:12, color:C.primary, background:"none", border:"none", cursor:"pointer", fontWeight:600 }}>View all interfaces →</button>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:12 }}>
+                  {bandwidth.slice(0,6).map((iface,i)=>{
+                    const rxMB = (iface.rxBytes/1024/1024).toFixed(1);
+                    const txMB = (iface.txBytes/1024/1024).toFixed(1);
+                    const rxKbps = iface.rxBps>0 ? (iface.rxBps/1024).toFixed(1) : null;
+                    const txKbps = iface.txBps>0 ? (iface.txBps/1024).toFixed(1) : null;
+                    return (
+                      <div key={i} style={{ padding:14, borderRadius:10, border:`1px solid ${C.border}`, background:"#f8fafc" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
+                          <span style={{ fontSize:13, fontWeight:700, color:C.text }}>{iface.name}</span>
+                          <span style={{ fontSize:10, fontWeight:700, padding:"2px 6px", borderRadius:6,
+                            background:iface.link==="Up"?"#f0fdf4":"#fef2f2",
+                            color:iface.link==="Up"?C.ok:C.critical }}>{iface.link}</span>
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, textAlign:"center" }}>
+                          <div style={{ background:"#f0fdf4", borderRadius:6, padding:"6px 4px" }}>
+                            <div style={{ fontSize:14, fontWeight:700, color:C.ok }}>{rxKbps?`${rxKbps}K`:`${rxMB}MB`}</div>
+                            <div style={{ fontSize:10, color:C.muted }}>↓ RX</div>
+                          </div>
+                          <div style={{ background:"#eff6ff", borderRadius:6, padding:"6px 4px" }}>
+                            <div style={{ fontSize:14, fontWeight:700, color:C.primary }}>{txKbps?`${txKbps}K`:`${txMB}MB`}</div>
+                            <div style={{ fontSize:10, color:C.muted }}>↑ TX</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            )}
           </div>
         )}
 
