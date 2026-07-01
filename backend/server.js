@@ -124,7 +124,12 @@ async function collectUpGuard() {
     await setStatus("upguard", "connected");
     return snap;
   } catch(e) {
-    await setStatus("upguard", "error", e.message);
+    const msg = e.response
+      ? e.response.status === 401 ? "HTTP 401 — invalid API key"
+      : e.response.status === 403 ? "HTTP 403 — API key lacks required permissions"
+      : `HTTP ${e.response.status} from UpGuard API`
+      : e.message;
+    await setStatus("upguard", "error", msg);
     return null;
   }
 }
@@ -179,11 +184,20 @@ async function collectQualys() {
   const c = await getCreds("qualys");
   if (!c) return null;
   try {
-    const platform = (c.platform||"https://qualysapi.qualys.com").replace(/\/$/, "");
+    // Normalise platform URL: accept both qualysguard.* (web UI) and qualysapi.* (API)
+    let platform = (c.platform||"https://qualysapi.qualys.com").replace(/\/$/, "");
+    // If user pasted the web UI URL, convert it to the API URL
+    platform = platform.replace(/\/\/qualysguard\./, "//qualysapi.");
+    // Ensure https:// prefix
+    if (!/^https?:\/\//.test(platform)) platform = "https://" + platform;
     const auth = Buffer.from(`${c.username}:${c.password}`).toString("base64");
     const headers = { Authorization: `Basic ${auth}`, "X-Requested-With": "SecOpsDashboard" };
+    // First do a lightweight ping to the session API to verify credentials
+    const ping = await http.get(`${platform}/api/2.0/fo/session/`, {
+      headers, params: { action: "login" }, validateStatus: s => s < 500,
+    }).catch(() => null);
     const r = await http.get(
-      `${platform}/api/2.0/fo/asset/host/vm/detection/?action=list&status=New,Active&severities=4,5&truncation_limit=100`,
+      `${platform}/api/2.0/fo/asset/host/vm/detection/?action=list&status=New,Active&severities=4,5&truncation_limit=50`,
       { headers }
     );
     const snap = { source:"qualys", detections: r.data };
@@ -191,7 +205,10 @@ async function collectQualys() {
     await setStatus("qualys", "connected");
     return snap;
   } catch(e) {
-    await setStatus("qualys", "error", e.message);
+    const msg = e.response
+      ? `HTTP ${e.response.status} from Qualys API — check platform URL and credentials`
+      : e.message;
+    await setStatus("qualys", "error", msg);
     return null;
   }
 }
@@ -396,7 +413,12 @@ app.post("/api/integrations/:tool/test", async (req, res) => {
       const row = await pool.query("SELECT last_error FROM integrations WHERE tool_name=$1", [tool]);
       res.json({ success: false, error: row.rows[0]?.last_error || "Connection failed" });
     }
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  } catch(e) {
+    const msg = e.response
+      ? `HTTP ${e.response.status}: ${e.response.data?.message || e.response.statusText || "API error"}`
+      : e.message;
+    res.json({ success: false, error: msg });
+  }
 });
 
 // Delete credentials
