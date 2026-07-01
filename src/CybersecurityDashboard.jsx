@@ -1668,6 +1668,337 @@ const FIELDS = {
   taegis:       [["clientId","Client ID",""],["clientSecret","Client Secret",""],["region","Region","us1"]],
 };
 
+// ── Admin – Integration Status ────────────────────────────────────────────────
+function AdminPage() {
+  const [statuses,    setStatuses]    = useState({});
+  const [testing,     setTesting]     = useState(null);
+  const [collecting,  setCollecting]  = useState(false);
+  const [testResults, setTestResults] = useState({});
+  const [toast,       setToast]       = useState(null);
+  const [collectLog,  setCollectLog]  = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
+
+  useEffect(() => {
+    fetchStatuses();
+    const t = setInterval(fetchStatuses, 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function fetchStatuses() {
+    try {
+      const r = await fetch(`${API}/api/integrations`);
+      if (r.ok) {
+        const arr = await r.json();
+        const m = {};
+        arr.forEach(x => { m[x.tool_name] = x; });
+        setStatuses(m);
+        setLastRefresh(new Date());
+      }
+    } catch(e) { console.error("Admin fetch failed:", e); }
+  }
+
+  function showToast(msg, ok=true) {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 4000);
+  }
+
+  async function testTool(toolKey, instanceIdx=null) {
+    const key = instanceIdx !== null ? `${toolKey}__${instanceIdx}` : toolKey;
+    setTesting(key);
+    try {
+      const url = instanceIdx !== null
+        ? `${API}/api/integrations/${toolKey}/test?instance=${instanceIdx}`
+        : `${API}/api/integrations/${toolKey}/test`;
+      const r = await fetch(url, { method: "POST" });
+      const d = await r.json();
+      setTestResults(prev => ({ ...prev, [key]: d }));
+      showToast(d.success ? `${toolKey} — connected ✅` : `${toolKey} — ${d.error}`, d.success);
+      fetchStatuses();
+    } catch(e) {
+      setTestResults(prev => ({ ...prev, [key]: { success: false, error: e.message } }));
+      showToast(`Test failed: ${e.message}`, false);
+    }
+    setTesting(null);
+  }
+
+  async function collectNow() {
+    setCollecting(true);
+    setCollectLog("Triggering collection for all configured integrations…");
+    try {
+      const r = await fetch(`${API}/api/collect`, { method: "POST" });
+      const d = await r.json();
+      setCollectLog(d.message || "Collection triggered. Data will update in ~30 seconds.");
+      showToast("Collection triggered ✅");
+      setTimeout(fetchStatuses, 5000);
+    } catch(e) {
+      setCollectLog(`Error: ${e.message}`);
+      showToast("Collection trigger failed", false);
+    }
+    setCollecting(false);
+  }
+
+  const STATUS_CFG = {
+    connected:    { color: C.ok,       bg: "#f0fdf4", dot: "#16a34a", label: "Connected"    },
+    configured:   { color: C.warn,     bg: "#fffbeb", dot: "#d97706", label: "Configured"   },
+    error:        { color: C.critical, bg: "#fef2f2", dot: "#dc2626", label: "Error"        },
+    unconfigured: { color: C.muted,    bg: "#f8fafc", dot: "#cbd5e1", label: "Not Set Up"   },
+  };
+
+  const totalTools  = TOOLS.length;
+  const connected   = Object.values(statuses).filter(s => s.status === "connected").length;
+  const errored     = Object.values(statuses).filter(s => s.status === "error").length;
+  const unconfigured = Object.values(statuses).filter(s => s.status === "unconfigured" || !s.status).length;
+
+  return (
+    <div>
+      <SectionTitle
+        title="Admin — Integration Status"
+        subtitle="Live status of all connected security devices and services. Auto-refreshes every 30 seconds."
+        action={
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            {lastRefresh && <span style={{ fontSize:11, color:C.muted }}>Last refresh: {lastRefresh.toLocaleTimeString()}</span>}
+            <button onClick={fetchStatuses}
+              style={{ padding:"6px 14px", borderRadius:8, border:`1px solid ${C.border}`, background:"white",
+                color:C.text, fontSize:12, fontWeight:600, cursor:"pointer" }}>
+              🔄 Refresh
+            </button>
+            <button onClick={collectNow} disabled={collecting}
+              style={{ padding:"6px 14px", borderRadius:8, border:"none", background:C.primary,
+                color:"white", fontSize:12, fontWeight:700, cursor:"pointer" }}>
+              {collecting ? "Collecting…" : "⚡ Collect All Now"}
+            </button>
+          </div>
+        }
+      />
+
+      {toast && (
+        <div style={{ position:"fixed", bottom:24, right:24, zIndex:1000,
+          background: toast.ok ? C.ok : C.critical, color:"white",
+          padding:"12px 20px", borderRadius:10, fontSize:13, fontWeight:600,
+          boxShadow:"0 4px 20px rgba(0,0,0,0.25)", maxWidth:340 }}>
+          {toast.msg}
+        </div>
+      )}
+
+      {/* Summary KPI row */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:16, marginBottom:24 }}>
+        {[
+          { icon:"🔌", label:"Total Integrations", value:totalTools,   color:C.primaryLight },
+          { icon:"✅", label:"Connected",           value:connected,    color:C.ok           },
+          { icon:"⚠️", label:"Errors",              value:errored,      color:C.critical     },
+          { icon:"⚙️", label:"Not Configured",      value:unconfigured, color:C.muted        },
+        ].map(k => (
+          <Card key={k.label} style={{ padding:20, display:"flex", alignItems:"center", gap:16 }}>
+            <div style={{ width:44, height:44, borderRadius:10, background:`${k.color}18`,
+              display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0 }}>
+              {k.icon}
+            </div>
+            <div>
+              <div style={{ fontSize:28, fontWeight:800, color:C.text, lineHeight:1 }}>{k.value}</div>
+              <div style={{ fontSize:11, color:C.muted, marginTop:3 }}>{k.label}</div>
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      {/* Collect log */}
+      {collectLog && (
+        <div style={{ background:"#f0fdf4", border:`1px solid #bbf7d0`, borderRadius:10,
+          padding:"12px 16px", marginBottom:16, fontSize:13, color:"#166534" }}>
+          ⚡ {collectLog}
+        </div>
+      )}
+
+      {/* Device status table */}
+      <Card style={{ padding:0, overflow:"hidden" }}>
+        <div style={{ padding:"16px 20px", borderBottom:`1px solid ${C.border}`,
+          display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text }}>Integrated Devices & Services</div>
+          <div style={{ fontSize:11, color:C.muted }}>Click Test to verify live connectivity</div>
+        </div>
+
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ background:"#f8fafc" }}>
+              {["Tool / Device","Category","Status","Instances","Last Tested","Refresh Interval","Last Error","Actions"].map(h => (
+                <th key={h} style={{ padding:"10px 16px", textAlign:"left", fontSize:11,
+                  fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:0.5,
+                  borderBottom:`2px solid ${C.border}`, whiteSpace:"nowrap" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {TOOLS.map(tool => {
+              const st       = statuses[tool.key] || {};
+              const cfg      = STATUS_CFG[st.status] || STATUS_CFG.unconfigured;
+              const isMulti  = MULTI_INSTANCE_TOOLS.includes(tool.key);
+              const instances= st.credentials?.instances || [];
+              const interval = st.refresh_interval || 300;
+              const mins     = Math.round(interval / 60);
+
+              return (
+                <React.Fragment key={tool.key}>
+                  {/* Main tool row */}
+                  <tr style={{ borderBottom:`1px solid ${C.border}`,
+                    background: st.status === "error" ? "#fff5f5" : "transparent" }}>
+
+                    {/* Tool name */}
+                    <td style={{ padding:"14px 16px" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                        <div style={{ width:36, height:36, borderRadius:8, background:`${tool.color}18`,
+                          display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>
+                          {tool.icon}
+                        </div>
+                        <div>
+                          <div style={{ fontSize:13, fontWeight:700, color:C.text }}>{tool.name}</div>
+                          {isMulti && <div style={{ fontSize:10, color:tool.color, fontWeight:700 }}>MULTI-INSTANCE</div>}
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Category */}
+                    <td style={{ padding:"14px 16px", fontSize:12, color:C.muted }}>{tool.cat}</td>
+
+                    {/* Status badge */}
+                    <td style={{ padding:"14px 16px" }}>
+                      <div style={{ display:"inline-flex", alignItems:"center", gap:6,
+                        background:cfg.bg, borderRadius:20, padding:"4px 12px" }}>
+                        <div style={{ width:7, height:7, borderRadius:"50%", background:cfg.dot,
+                          boxShadow: st.status === "connected" ? `0 0 0 3px ${cfg.dot}30` : "none" }}/>
+                        <span style={{ fontSize:12, fontWeight:700, color:cfg.color }}>{cfg.label}</span>
+                      </div>
+                    </td>
+
+                    {/* Instances count */}
+                    <td style={{ padding:"14px 16px", fontSize:13, color:C.text }}>
+                      {isMulti
+                        ? <span style={{ fontWeight:700 }}>{instances.length} instance{instances.length !== 1 ? "s" : ""}</span>
+                        : <span style={{ color:C.muted }}>—</span>}
+                    </td>
+
+                    {/* Last tested */}
+                    <td style={{ padding:"14px 16px", fontSize:12, color:C.muted, whiteSpace:"nowrap" }}>
+                      {st.last_tested
+                        ? new Date(st.last_tested).toLocaleString()
+                        : <span style={{ fontStyle:"italic" }}>Never</span>}
+                    </td>
+
+                    {/* Refresh interval */}
+                    <td style={{ padding:"14px 16px" }}>
+                      <span style={{ fontSize:12, background:"#f1f5f9", borderRadius:6,
+                        padding:"3px 10px", color:C.text, fontWeight:600 }}>
+                        Every {mins} min
+                      </span>
+                    </td>
+
+                    {/* Last error */}
+                    <td style={{ padding:"14px 16px", maxWidth:220 }}>
+                      {st.last_error
+                        ? <span style={{ fontSize:11, color:C.critical, background:"#fef2f2",
+                            padding:"3px 8px", borderRadius:6, display:"block",
+                            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+                            maxWidth:200, title:st.last_error }}>
+                            {st.last_error}
+                          </span>
+                        : <span style={{ fontSize:11, color:C.ok }}>—</span>}
+                    </td>
+
+                    {/* Actions */}
+                    <td style={{ padding:"14px 16px" }}>
+                      {!isMulti && st.status !== "unconfigured" && (
+                        <button onClick={() => testTool(tool.key)}
+                          disabled={testing === tool.key}
+                          style={{ padding:"5px 14px", borderRadius:7, border:`1px solid ${C.primaryLight}`,
+                            background:"white", color:C.primary, fontSize:12, fontWeight:600,
+                            cursor:"pointer", whiteSpace:"nowrap" }}>
+                          {testing === tool.key ? "Testing…" : "🔗 Test"}
+                        </button>
+                      )}
+                      {isMulti && instances.length === 0 && (
+                        <span style={{ fontSize:11, color:C.muted, fontStyle:"italic" }}>No instances</span>
+                      )}
+                    </td>
+                  </tr>
+
+                  {/* Test result for single-instance */}
+                  {!isMulti && testResults[tool.key] && (
+                    <tr style={{ borderBottom:`1px solid ${C.border}` }}>
+                      <td colSpan={8} style={{ padding:"0 16px 12px 66px" }}>
+                        <div style={{ background: testResults[tool.key].success ? "#f0fdf4" : "#fef2f2",
+                          borderRadius:8, padding:"10px 14px", fontSize:12,
+                          color: testResults[tool.key].success ? "#166534" : C.critical }}>
+                          {testResults[tool.key].success ? "✅ Connected — " : "❌ Failed — "}
+                          {testResults[tool.key].message || testResults[tool.key].error || ""}
+                          {testResults[tool.key].sample && (
+                            <pre style={{ marginTop:8, background:"white", borderRadius:6, padding:10,
+                              fontSize:11, fontFamily:"monospace", maxHeight:100, overflow:"auto",
+                              border:`1px solid ${C.border}` }}>
+                              {JSON.stringify(testResults[tool.key].sample, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+
+                  {/* Instance rows for multi-instance tools */}
+                  {isMulti && instances.map((inst, idx) => {
+                    const instKey = `${tool.key}__${idx}`;
+                    const tr = testResults[instKey];
+                    return (
+                      <React.Fragment key={instKey}>
+                        <tr style={{ background:"#f8fafc", borderBottom:`1px solid ${C.border}` }}>
+                          <td style={{ padding:"10px 16px 10px 66px" }}>
+                            <div style={{ fontSize:12, fontWeight:600, color:C.text }}>
+                              {inst.name || `Instance ${idx + 1}`}
+                            </div>
+                            <div style={{ fontSize:11, color:C.muted }}>{inst.host || inst.tenantId || inst.subscriptionId || ""}</div>
+                          </td>
+                          <td style={{ padding:"10px 16px", fontSize:11, color:C.muted }}>Instance {idx + 1}</td>
+                          <td colSpan={4}/>
+                          <td/>
+                          <td style={{ padding:"10px 16px" }}>
+                            <button onClick={() => testTool(tool.key, idx)}
+                              disabled={testing === instKey}
+                              style={{ padding:"4px 12px", borderRadius:7, border:`1px solid ${C.primaryLight}`,
+                                background:"white", color:C.primary, fontSize:11, fontWeight:600,
+                                cursor:"pointer", whiteSpace:"nowrap" }}>
+                              {testing === instKey ? "Testing…" : "🔗 Test"}
+                            </button>
+                          </td>
+                        </tr>
+                        {tr && (
+                          <tr style={{ borderBottom:`1px solid ${C.border}` }}>
+                            <td colSpan={8} style={{ padding:"0 16px 10px 66px" }}>
+                              <div style={{ background: tr.success ? "#f0fdf4" : "#fef2f2",
+                                borderRadius:8, padding:"8px 12px", fontSize:12,
+                                color: tr.success ? "#166534" : C.critical }}>
+                                {tr.success ? "✅ " : "❌ "}
+                                {tr.message || tr.error || ""}
+                                {tr.sample && (
+                                  <pre style={{ marginTop:6, background:"white", borderRadius:6, padding:8,
+                                    fontSize:11, fontFamily:"monospace", maxHeight:80, overflow:"auto",
+                                    border:`1px solid ${C.border}` }}>
+                                    {JSON.stringify(tr.sample, null, 2)}
+                                  </pre>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
 function IntegrationsPage({ onSave }) {
   const [statuses,    setStatuses]    = useState({});
   const [editing,     setEditing]     = useState(null);   // toolKey or "toolKey__idx"
@@ -2022,6 +2353,7 @@ export default function CybersecurityDashboard() {
     { id:"threats",  icon:"🎯", label:"Threat Intelligence" },
     { id:"cloud",    icon:"☁️", label:"Cloud Security" },
     { id:"report",   icon:"📊", label:"Executive Report" },
+    { id:"admin",    icon:"🔌", label:"Admin" },
   ];
   const analystNav = [
     { id:"alerts",     icon:"🚨", label:"Alert Queue" },
@@ -2031,6 +2363,7 @@ export default function CybersecurityDashboard() {
     { id:"assets",     icon:"💻", label:"Assets & Patches" },
     { id:"cloudanalyst",icon:"☁️",label:"Cloud Security" },
     { id:"siem",       icon:"📡", label:"SIEM / XDR" },
+    { id:"admin",      icon:"🔌", label:"Admin" },
   ];
   const nav = role === "executive" ? execNav : analystNav;
 
@@ -2075,6 +2408,7 @@ export default function CybersecurityDashboard() {
       case "assets":       return <AssetsPage {...p}/>;
       case "cloudanalyst": return <CloudAnalystPage {...p}/>;
       case "siem":         return <SIEMPage {...p}/>;
+      case "admin":   return <AdminPage />;
       case "settings": return <IntegrationsPage onSave={loadData}/>;
       default:         return <OverviewPage {...p}/>;
     }
