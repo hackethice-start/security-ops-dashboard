@@ -200,24 +200,25 @@ async def ensure_partitions():
 
 
 async def seed_users():
+    """Upsert default users with pre-computed passlib/bcrypt hashes.
+    Always runs ON CONFLICT DO UPDATE so hash format is never stale."""
     pool = await get_pool()
+    # Hashes pre-computed with passlib bcrypt rounds=12
+    # Passwords: Admin@1234 / Analyst@1234 / Exec@1234
     defaults = [
-        ("admin",    "Admin@1234",   "admin",     "Administrator"),
-        ("analyst",  "Analyst@1234", "analyst",   "Security Analyst"),
-        ("executive","Exec@1234",    "executive", "Executive"),
+        ("admin",     "$2b$12$hzBTZK9tJ.fy93F4Q14v9OqN34xAIjxBVpcRQsPCbNvi1BYGGLTOG", "admin",     "Administrator"),
+        ("analyst",   "$2b$12$Dnhj4GsnW7FlR2WVbZFQEesMAATnH8ju5ERQTK1IAnGlsyuxv2dGK", "analyst",   "Security Analyst"),
+        ("executive", "$2b$12$WSTZ7yuCuCtawP/JqhyO/uOecCmqfll3UBSRIocdu5esza95EK1Wm", "executive", "Executive"),
     ]
     async with pool.acquire() as conn:
-        for username, password, role, display_name in defaults:
-            exists = await conn.fetchval(
-                "SELECT id FROM users WHERE username=$1", username
-            )
-            if not exists:
-                pw_hash = _pwd_ctx.hash(password)
-                await conn.execute("""
-                    INSERT INTO users (id, username, password_hash, role, display_name)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, uuid.uuid4(), username, pw_hash, role, display_name)
-                log.info("Seeded user: %s", username)
+        for username, pw_hash, role, display_name in defaults:
+            await conn.execute("""
+                INSERT INTO users (id, username, password_hash, role, display_name)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (username) DO UPDATE
+                SET password_hash=$3, role=$4, display_name=$5
+            """, uuid.uuid4(), username, pw_hash, role, display_name)
+    log.info("Default users seeded/refreshed (admin / analyst / executive)")
 
 
 async def getCreds(tool: str) -> dict | None:
