@@ -59,6 +59,20 @@ async def get_pool() -> asyncpg.Pool:
 # ---------------------------------------------------------------------------
 app = FastAPI(title="SecOps Dashboard", version="2.0.0")
 
+# Return {error:...} instead of FastAPI default {detail:...} so frontend can read it
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+
+@app.exception_handler(HTTPException)
+async def http_exc_handler(request, exc):
+    return JSONResponse(status_code=exc.status_code,
+                        content={"error": exc.detail, "ok": False})
+
+@app.exception_handler(RequestValidationError)
+async def validation_exc_handler(request, exc):
+    return JSONResponse(status_code=422,
+                        content={"error": "Invalid request", "ok": False})
+
 # CORS: reflect Origin header so cookies work with credentials: "include"
 # allow_origins=["*"] + allow_credentials=True is invalid per spec — browsers block it.
 app.add_middleware(
