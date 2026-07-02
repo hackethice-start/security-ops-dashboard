@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import asyncpg
-import bcrypt
+from passlib.context import CryptContext
+
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, status
@@ -73,34 +75,42 @@ scheduler = AsyncIOScheduler()
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
+    """Startup: connect DB, seed users, ensure partitions, start scheduler."""
     global _pool
 
-    # 1. Wait for DB
+    # 1. Wait for DB (up to 90 seconds)
     log.info("Waiting for database…")
-    for attempt in range(10):
+    connected = False
+    for attempt in range(30):
         try:
             _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
             log.info("Database connected.")
+            connected = True
             break
         except Exception as exc:
-            log.warning("DB not ready (attempt %d/10): %s", attempt + 1, exc)
-            if attempt == 9:
-                raise
+            log.warning("DB not ready (attempt %d/30): %s", attempt + 1, exc)
             await asyncio.sleep(3)
 
-    # 2. Ensure tables / partitions
-    await ensure_users_table()
-    await ensure_partitions()
+    if not connected:
+        log.error("Could not connect to database after 30 attempts. Routes will fail until DB is available.")
+        return  # Don't crash — let health endpoint respond, Docker will handle restart
 
-    # 3. Seed default users
-    await seed_users()
+    # 2. Ensure tables / partitions (non-fatal)
+    try:
+        await ensure_users_table()
+        await ensure_partitions()
+        await seed_users()
+    except Exception as e:
+        log.error("Table setup error (continuing): %s", e)
 
-    # 4. Start scheduler
-    scheduler.start()
-    scheduler.add_job(ensure_partitions, "interval", hours=24, id="partition_maintenance")
-
-    # 5. Schedule enabled integrations
-    await schedule_all_integrations()
+    # 3. Start scheduler
+    try:
+        scheduler.start()
+        scheduler.add_job(ensure_partitions, "interval", hours=24, id="partition_maintenance",
+                          replace_existing=True)
+        await schedule_all_integrations()
+    except Exception as e:
+        log.error("Scheduler error (continuing): %s", e)
 
     log.info("Startup complete.")
 
@@ -200,7 +210,7 @@ async def seed_users():
                 "SELECT id FROM users WHERE username=$1", username
             )
             if not exists:
-                pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+                pw_hash = _pwd_ctx.hash(password)
                 await conn.execute("""
                     INSERT INTO users (id, username, password_hash, role, display_name)
                     VALUES ($1, $2, $3, $4, $5)
@@ -312,7 +322,7 @@ async def login(body: LoginRequest, response: Response):
         )
     if not row:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not bcrypt.checkpw(body.password.encode(), row["password_hash"].encode()):
+    if not _pwd_ctx.verify(body.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # Update last_login

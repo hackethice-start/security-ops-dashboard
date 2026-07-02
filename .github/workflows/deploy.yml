@@ -54,7 +54,7 @@ jobs:
       - name: Wait and diagnose startup
         run: |
           echo "=== Waiting 60s for containers to start ==="
-          sleep 60
+          sleep 90
           echo ""
           echo "=== Container status ==="
           docker compose ps -a
