@@ -409,10 +409,10 @@ async def save_integration(
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO integrations (tool_name, credentials, updated_at)
-            VALUES ($1, $2::jsonb, NOW())
+            INSERT INTO integrations (tool_name, credentials, enabled, status, updated_at)
+            VALUES ($1, $2::jsonb, true, 'configured', NOW())
             ON CONFLICT (tool_name) DO UPDATE
-            SET credentials=$2::jsonb, updated_at=NOW()
+            SET credentials=$2::jsonb, enabled=true, status='configured', updated_at=NOW()
             """,
             tool,
             _json.dumps(body.credentials),
@@ -567,10 +567,9 @@ async def run_collector(tool: str) -> dict | None:
 # ---------------------------------------------------------------------------
 async def collect_upguard() -> dict:
     creds = await getCreds("upguard")
-    if not creds or not creds.get("apikey"):
-        raise ValueError("UpGuard: missing 'apikey' credential")
-
-    api_key = creds["apikey"]
+    api_key = creds.get("api_key") or creds.get("apikey")
+    if not api_key:
+        raise ValueError("UpGuard: missing api_key credential")
     base = "https://cyber-risk.upguard.com/api/public/v2"
     headers = {"Authorization": f"Bearer {api_key}"}
     result: Dict[str, Any] = {"source": "upguard"}
@@ -609,9 +608,9 @@ async def collect_qualys() -> dict:
         raise ValueError("Qualys: no credentials configured")
     username = creds.get("username")
     password = creds.get("password")
-    api_url = creds.get("api_url", "").rstrip("/")
+    api_url = (creds.get("platform_url") or creds.get("api_url") or "").rstrip("/")
     if not all([username, password, api_url]):
-        raise ValueError("Qualys: requires username, password, api_url")
+        raise ValueError("Qualys: requires username, password, and platform_url")
 
     url = (
         f"{api_url}/api/2.0/fo/asset/host/vm/detection/"
@@ -824,7 +823,7 @@ async def collect_manageengine() -> dict:
     if not creds:
         raise ValueError("ManageEngine: no credentials configured")
 
-    url_base = creds.get("url", "").rstrip("/")
+    url_base = (creds.get("server_url") or creds.get("url") or "").rstrip("/")
     api_key = creds.get("api_key")
     if not url_base or not api_key:
         raise ValueError("ManageEngine: requires url and api_key")
