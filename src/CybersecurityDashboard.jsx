@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, LineChart, Line, Legend } from 'recharts';
 
-const API = `http://${window.location.hostname}:4000`;
+// All API calls go through nginx (/api/*) — no CORS, cookies always work
+const API = "";
 
 const C = {
   bg:       "#070d1a",
