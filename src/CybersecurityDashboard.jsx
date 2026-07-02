@@ -2226,7 +2226,7 @@ const TOOLS_CONFIG = [
 /* ═══════════════════════════════════════════════════════════════════════════
    SETTINGS PAGE
    ═════════════════════════════════════════════════════════════════════════ */
-function SettingsToolCard({ tool, existing, collecting, onCollect, onSaved }) {
+function SettingsToolCard({ tool, existing, collecting, onCollect, onSaved, onRefresh }) {
   const [expanded,   setExpanded]   = useState(false);
   const [formValues, setFormValues] = useState({});
   const [instances,  setInstances]  = useState([{ name: "", host: "", apikey: "" }]);
@@ -2291,6 +2291,7 @@ function SettingsToolCard({ tool, existing, collecting, onCollect, onSaved }) {
       const j = await res.json().catch(() => ({}));
       if (j.ok || j.success) {
         setTestResult({ ok: true, msg: "✅ " + (j.message || "Connection successful.") });
+        if (onRefresh) setTimeout(onRefresh, 1000);
       } else {
         setTestResult({ ok: false, msg: "❌ " + (j.error || "Connection test failed.") });
       }
@@ -2466,7 +2467,7 @@ function SettingsToolCard({ tool, existing, collecting, onCollect, onSaved }) {
   );
 }
 
-function SettingsPage({ data, collecting, onCollect, collectMsg }) {
+function SettingsPage({ data, collecting, onCollect, collectMsg, onRefresh }) {
   const [integrations, setIntegrations] = useState({});
   const [loadingInteg, setLoadingInteg] = useState(true);
 
@@ -2509,7 +2510,8 @@ function SettingsPage({ data, collecting, onCollect, collectMsg }) {
               existing={integrations[tool.key] || null}
               collecting={collecting}
               onCollect={onCollect}
-              onSaved={fetchIntegrations}
+              onSaved={() => { fetchIntegrations(); if (onRefresh) onRefresh(); }}
+              onRefresh={onRefresh}
             />
           ))}
         </div>
@@ -2632,7 +2634,7 @@ export default function App() {
   }
 
   /* Page renderer */
-  const pageProps = { data, collecting, onCollect: collectNow, collectMsg };
+  const pageProps = { data, collecting, onCollect: collectNow, collectMsg, onRefresh: loadAll };
 
   function renderPage() {
     if (role === "executive") return <ExecutiveDashboard {...pageProps} />;
@@ -2801,6 +2803,12 @@ export default function App() {
             </div>
           )}
 
+          {/* Refresh button */}
+          <button onClick={loadAll} title="Refresh data now" style={{
+            background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)",
+            color: "rgba(255,255,255,0.75)", borderRadius: 6, padding: "4px 12px",
+            cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
+          }}>⟳ Refresh</button>
           {/* Auto-refresh countdown */}
           <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", display: "flex", alignItems: "center", gap: 5 }}>
             <span>Auto-refresh in {refreshTick}s</span>
