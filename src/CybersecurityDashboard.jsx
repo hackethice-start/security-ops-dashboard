@@ -1530,28 +1530,60 @@ const TOOLS_CONFIG = [
   },
 ];
 
-function SettingsToolCard({ tool, status, collectedAt, collecting, onCollect, collectMsg }) {
-  const [expanded, setExpanded] = useState(false);
-  const [formValues, setFormValues] = useState({});
-  const [instances, setInstances] = useState([{ name: "", host: "", apikey: "" }]);
-  const [testResult, setTestResult] = useState(null);
-  const [saving, setSaving] = useState(false);
+function SettingsToolCard({ tool, existing, collecting, onCollect, onSaved }) {
+  const [expanded,    setExpanded]    = useState(false);
+  const [formValues,  setFormValues]  = useState({});
+  const [instances,   setInstances]   = useState([{ name: "", host: "", apikey: "" }]);
+  const [testResult,  setTestResult]  = useState(null);
+  const [saving,      setSaving]      = useState(false);
+  const status     = existing?.status     || "no-data";
+  const lastError  = existing?.last_error || null;
+  const collectedAt= existing?.last_tested|| null;
+  const collectedAtSnap = existing?.collectedAt || null;
+
+  // Pre-populate form when expanded (backend returns safe_credentials + instances)
+  function handleExpand() {
+    if (!expanded && existing) {
+      if (tool.multiInstance) {
+        const insts = existing.instances;
+        if (insts && insts.length > 0) {
+          // Backend strips apikeys — keep them blank for re-entry
+          setInstances(insts.map(i => ({ name: i.name||"", host: i.host||"", apikey: "" })));
+        }
+      } else {
+        const safe = existing.safe_credentials || {};
+        const prefill = {};
+        (tool.fields || []).forEach(f => {
+          // Leave password fields empty (never returned by backend)
+          prefill[f.key] = f.type === "password" ? "" : (safe[f.key] || "");
+        });
+        setFormValues(prefill);
+      }
+    }
+    setExpanded(!expanded);
+  }
 
   function setField(key, val) {
     setFormValues((prev) => ({ ...prev, [key]: val }));
   }
 
   async function handleSave() {
-    setSaving(true);
+    setSaving(true); setTestResult(null);
     try {
       const body = tool.multiInstance ? { instances } : formValues;
-      const res = await apiFetch(`${API}/api/settings/${tool.key}`, {
+      const res = await apiFetch(`${API}/api/integrations/${tool.key}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const j = await res.json().catch(() => ({}));
-      setTestResult(j.ok ? { ok: true, msg: "Settings saved successfully." } : { ok: false, msg: j.error || "Save failed." });
+      if (j.ok !== false) {
+        setTestResult({ ok: true, msg: "✅ Saved! Collecting data now…" });
+        setExpanded(false);
+        if (onSaved) onSaved();
+      } else {
+        setTestResult({ ok: false, msg: j.error || "Save failed." });
+      }
     } catch (err) {
       setTestResult({ ok: false, msg: err.message || "Network error." });
     }
@@ -1559,13 +1591,14 @@ function SettingsToolCard({ tool, status, collectedAt, collecting, onCollect, co
   }
 
   async function handleTest() {
-    setTestResult({ ok: null, msg: "Testing connection…" });
+    setTestResult({ ok: null, msg: "⏳ Testing connection…" });
     try {
-      const res = await apiFetch(`${API}/api/settings/${tool.key}/test`, { method: "POST" });
+      const res = await apiFetch(`${API}/api/integrations/${tool.key}/test`, { method: "POST" });
       const j = await res.json().catch(() => ({}));
-      setTestResult(j.ok ? { ok: true, msg: j.message || "Connection successful." } : { ok: false, msg: j.error || "Test failed." });
+      setTestResult(j.ok ? { ok: true, msg: "✅ " + (j.message || "Connection successful.") }
+                         : { ok: false, msg: "❌ " + (j.error || "Test failed.") });
     } catch (err) {
-      setTestResult({ ok: false, msg: err.message || "Network error." });
+      setTestResult({ ok: false, msg: "❌ " + (err.message || "Network error.") });
     }
   }
 
@@ -1579,12 +1612,15 @@ function SettingsToolCard({ tool, status, collectedAt, collecting, onCollect, co
         </div>
         <StatusBadge status={status} />
       </div>
-      {collectedAt && (
-        <div style={{ fontSize: 11, color: C.muted }}>Last collected: {new Date(collectedAt).toLocaleString()}</div>
+      {lastError && status === "error" && (
+        <div style={{ fontSize: 11, color: C.critical, background: "#fef2f2", padding: "6px 10px", borderRadius: 6 }}>⚠️ {lastError}</div>
+      )}
+      {(collectedAtSnap || collectedAt) && (
+        <div style={{ fontSize: 11, color: C.muted }}>Last collected: {new Date(collectedAtSnap || collectedAt).toLocaleString()}</div>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button onClick={() => setExpanded(!expanded)} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.primary}`, background: "none", color: C.primary, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
-          {expanded ? "Close" : "Configure"}
+        <button onClick={handleExpand} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.primary}`, background: "none", color: C.primary, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+          {expanded ? "Close" : (existing ? "Edit" : "Configure")}
         </button>
         <button onClick={handleTest} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.info}`, background: "none", color: C.info, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
           Test Connection
@@ -1647,26 +1683,55 @@ function SettingsToolCard({ tool, status, collectedAt, collecting, onCollect, co
 }
 
 function SettingsPage({ data, collecting, onCollect, collectMsg }) {
-  const status = data._integrationStatus || {};
-  const collectedAt = data._collectedAt || {};
+  const [integrations, setIntegrations] = useState({});
+  const [loadingInteg, setLoadingInteg] = useState(true);
+
+  const fetchIntegrations = useCallback(async () => {
+    setLoadingInteg(true);
+    try {
+      const res = await apiFetch(`${API}/api/integrations`);
+      if (res.ok) {
+        const list = await res.json().catch(() => []);
+        const map = {};
+        (Array.isArray(list) ? list : []).forEach(i => { map[i.tool_name] = i; });
+        // Merge snapshot collectedAt
+        const snappedAt = data._collectedAt || {};
+        Object.keys(snappedAt).forEach(k => {
+          if (map[k]) map[k].collectedAt = snappedAt[k];
+        });
+        setIntegrations(map);
+      }
+    } catch {}
+    setLoadingInteg(false);
+  }, [data._collectedAt]);
+
+  useEffect(() => { fetchIntegrations(); }, [fetchIntegrations]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>Settings</h2>
-      <p style={{ margin: 0, color: C.textSm, fontSize: 14 }}>Configure integrations, test connections, and collect data from each security tool.</p>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))", gap: 16 }}>
-        {TOOLS_CONFIG.map((tool) => (
-          <SettingsToolCard
-            key={tool.key}
-            tool={tool}
-            status={status[tool.key] || "no-data"}
-            collectedAt={collectedAt[tool.key]}
-            collecting={collecting}
-            onCollect={onCollect}
-            collectMsg={collectMsg}
-          />
-        ))}
+      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>Settings</h2>
+          <p style={{ margin: "4px 0 0", color: C.textSm, fontSize: 14 }}>Configure integrations, test connections, and collect data.</p>
+        </div>
+        {collectMsg && <CollectMsg msg={collectMsg} />}
       </div>
+      {loadingInteg ? (
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading integration status…</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))", gap: 16 }}>
+          {TOOLS_CONFIG.map((tool) => (
+            <SettingsToolCard
+              key={tool.key}
+              tool={tool}
+              existing={integrations[tool.key] || null}
+              collecting={collecting}
+              onCollect={onCollect}
+              onSaved={fetchIntegrations}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
