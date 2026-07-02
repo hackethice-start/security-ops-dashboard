@@ -943,6 +943,19 @@ app.get("/api/debug/snapshots", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Force-refresh: ensures partitions exist, then returns latest snapshot
+app.post("/api/snapshot/refresh", requireAuth, async (req, res) => {
+  try {
+    await ensurePartitions();
+    const r = await pool.query(
+      `SELECT DISTINCT ON (tool) tool, payload, collected_at FROM snapshots ORDER BY tool, collected_at DESC`
+    );
+    const snap = {};
+    r.rows.forEach(row => { snap[row.tool] = { ...row.payload, _collected_at: row.collected_at }; });
+    res.json({ data: snap, ts: new Date() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Latest snapshot per tool (optionally filtered by date range)
 app.get("/api/snapshot", requireAuth, async (req, res) => {
   const { from, to } = req.query;
@@ -1061,6 +1074,8 @@ app.listen(PORT, async () => {
   await ensureVulnTables().catch(e => console.error("ensureVulnTables:", e.message));
   // Schedule collectors based on per-tool intervals
   await scheduleCollectors();
+  // Ensure partitions checked daily (handles long-running servers crossing month boundary)
+  setInterval(() => ensurePartitions().catch(e => console.error("partition check:", e.message)), 24 * 60 * 60 * 1000);
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════

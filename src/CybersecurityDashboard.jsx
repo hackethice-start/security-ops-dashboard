@@ -45,6 +45,25 @@ async function apiFetch(url, opts = {}) {
   return fetch(url, { credentials: "include", ...opts });
 }
 
+/* ── usePageData: each page self-fetches fresh snapshot on mount ────────── */
+function usePageData(propData) {
+  const [fresh, setFresh] = useState(null);
+  useEffect(() => {
+    // Use GET /api/snapshot — always gets latest data regardless of App state
+    apiFetch(`${API}/api/snapshot`)
+      .then(r => r.ok ? r.json() : {})
+      .then(raw => {
+        const t = transformSnapshot(raw.data || raw);
+        setFresh(t);
+      })
+      .catch(() => {});
+  }, []);
+  // Prefer fresh snapshot; fall back to parent prop while loading
+  if (fresh && fresh._hasData) return fresh;
+  if (propData && propData._hasData) return propData;
+  return fresh || propData || {};
+}
+
 /* ── Severity helpers ────────────────────────────────────────────────────── */
 function severityLabel(n) {
   if (n >= 5) return "Critical";
@@ -329,7 +348,16 @@ function transformSnapshot(raw) {
 
 const GLOBAL_STYLES = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: ${C.bg}; font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  body {
+    background-color: #0a0f1e;
+    background-image:
+      radial-gradient(ellipse 80% 40% at 50% 0%, rgba(30,64,175,0.18) 0%, transparent 70%),
+      linear-gradient(90deg, rgba(6,182,212,0.04) 1px, transparent 1px),
+      linear-gradient(0deg,  rgba(6,182,212,0.04) 1px, transparent 1px);
+    background-size: 100% 100%, 48px 48px, 48px 48px;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #f1f5f9;
+  }
   ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 4px; }
@@ -1135,12 +1163,13 @@ function ExecutiveDashboard({ data, collecting, onCollect, collectMsg }) {
 /* ═══════════════════════════════════════════════════════════════════════════
    THREAT SURFACE PAGE (UpGuard)
    ═════════════════════════════════════════════════════════════════════════ */
-function ThreatSurfacePage({ data, collecting, onCollect, collectMsg }) {
+function ThreatSurfacePage({ data: propData, collecting, onCollect, collectMsg }) {
+  const data = usePageData(propData);
   const [tab, setTab] = useState("Overview");
   const [sevFilter, setSevFilter] = useState("All");
   const [domainSearch, setDomainSearch] = useState("");
   const surface = data.surface || {};
-  const hasData = (data._integrationStatus || {}).upguard === "connected";
+  const hasData = surface.score > 0 || (surface.risks || []).length > 0 || surface.domainCount > 0 || (surface.domains || []).length > 0;
 
   const riskCounts = useMemo(() => {
     const risks = surface.risks || [];
@@ -1330,7 +1359,8 @@ function ThreatSurfacePage({ data, collecting, onCollect, collectMsg }) {
 /* ═══════════════════════════════════════════════════════════════════════════
    VULNERABILITY PAGE (Qualys)
    ═════════════════════════════════════════════════════════════════════════ */
-function VulnerabilityPage({ data, collecting, onCollect, collectMsg }) {
+function VulnerabilityPage({ data: propData, collecting, onCollect, collectMsg }) {
+  const data = usePageData(propData);
   const [tab, setTab]         = useState("Summary");
   const [search, setSearch]   = useState("");
   const [sevFilter, setSevFilter] = useState("All");
@@ -1340,7 +1370,7 @@ function VulnerabilityPage({ data, collecting, onCollect, collectMsg }) {
 
   const vulns   = data.vulnerabilities || [];
   const summary = data.vulnSummary || {};
-  const hasData = (data._integrationStatus || {}).qualys === "connected";
+  const hasData = (data.vulnerabilities || []).length > 0 || (data.vulnSummary || {}).total > 0;
 
   const pieData = [
     { name: "Critical", value: summary.critical || 0, fill: C.critical },
@@ -1525,7 +1555,8 @@ function VulnerabilityPage({ data, collecting, onCollect, collectMsg }) {
 /* ═══════════════════════════════════════════════════════════════════════════
    FIREWALL PAGE (Fortinet + PaloAlto)
    ═════════════════════════════════════════════════════════════════════════ */
-function FirewallPage({ data, collecting, onCollect, collectMsg }) {
+function FirewallPage({ data: propData, collecting, onCollect, collectMsg }) {
+  const data = usePageData(propData);
   const firewall  = data.firewall || {};
   const instances = firewall.instances || [];
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -1909,9 +1940,10 @@ function FirewallPage({ data, collecting, onCollect, collectMsg }) {
 /* ═══════════════════════════════════════════════════════════════════════════
    ASSETS & PATCHES PAGE (ManageEngine)
    ═════════════════════════════════════════════════════════════════════════ */
-function AssetPage({ data, collecting, onCollect, collectMsg }) {
+function AssetPage({ data: propData, collecting, onCollect, collectMsg }) {
+  const data = usePageData(propData);
   const assets  = data.assets || {};
-  const hasData = (data._integrationStatus || {}).manageengine === "connected";
+  const hasData = (assets.total || 0) > 0 || (assets.list || []).length > 0;
 
   const compliancePie = [
     { name: "Compliant",     value: assets.patchCompliant    || 0, fill: C.ok },
@@ -2032,9 +2064,10 @@ function AssetPage({ data, collecting, onCollect, collectMsg }) {
 /* ═══════════════════════════════════════════════════════════════════════════
    CLOUD SECURITY PAGE (Azure)
    ═════════════════════════════════════════════════════════════════════════ */
-function CloudPage({ data, collecting, onCollect, collectMsg }) {
+function CloudPage({ data: propData, collecting, onCollect, collectMsg }) {
+  const data = usePageData(propData);
   const azure   = data.azure || {};
-  const hasData = (data._integrationStatus || {}).azure === "connected";
+  const hasData = (azure.secureScore || 0) > 0 || (azure.alerts || []).length > 0 || (azure.recommendations || []).length > 0;
   const [sevFilter, setSevFilter] = useState("All");
   const [expanded, setExpanded]   = useState(null);
 
@@ -2614,7 +2647,7 @@ export default function App() {
   if (loading) {
     return (
       <div style={{
-        minHeight: "100vh", background: C.bg,
+        minHeight: "100vh", background: "linear-gradient(135deg, #0a0f1e 0%, #0f172a 60%, #0a1628 100%)",
         display: "flex", alignItems: "center", justifyContent: "center",
         fontFamily: "'Inter','Segoe UI',system-ui,sans-serif",
       }}>
@@ -2658,7 +2691,7 @@ export default function App() {
   const critCount = (data.vulnSummary || {}).critical || 0;
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: C.bg, fontFamily: "'Inter','Segoe UI',system-ui,-apple-system,sans-serif", color: C.text }}>
+    <div style={{ display: "flex", minHeight: "100vh", background: "#0a0f1e", fontFamily: "'Inter','Segoe UI',system-ui,-apple-system,sans-serif", color: C.text }}>
       <style>{GLOBAL_STYLES}</style>
 
       {/* ── Sidebar ─────────────────────────────────────────────────── */}
