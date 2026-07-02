@@ -1,9 +1,7 @@
-FROM node:22-alpine
+FROM python:3.12-slim
 WORKDIR /app
-COPY package.json ./
-RUN npm install --production
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE 4000
-HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
-  CMD wget -qO- http://localhost:4000/api/health || exit 1
-CMD ["node", "server.js"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "4000"]
