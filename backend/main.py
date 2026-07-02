@@ -59,9 +59,11 @@ async def get_pool() -> asyncpg.Pool:
 # ---------------------------------------------------------------------------
 app = FastAPI(title="SecOps Dashboard", version="2.0.0")
 
+# CORS: reflect Origin header so cookies work with credentials: "include"
+# allow_origins=["*"] + allow_credentials=True is invalid per spec — browsers block it.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"https?://.*",   # matches any HTTP/HTTPS origin
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
