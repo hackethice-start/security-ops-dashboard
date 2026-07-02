@@ -1570,22 +1570,25 @@ function SettingsToolCard({ tool, existing, collecting, onCollect, onSaved }) {
   async function handleSave() {
     setSaving(true); setTestResult(null);
     try {
-      const body = tool.multiInstance ? { instances } : formValues;
+      // Backend expects { credentials: {...} }
+      const credentials = tool.multiInstance
+        ? { instances }           // { instances: [{name, host, apikey}, ...] }
+        : formValues;             // { apikey: "...", host: "...", username: "...", ... }
       const res = await apiFetch(`${API}/api/integrations/${tool.key}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ credentials }),
       });
       const j = await res.json().catch(() => ({}));
-      if (j.ok !== false) {
-        setTestResult({ ok: true, msg: "✅ Saved! Collecting data now…" });
+      if (res.ok) {
+        setTestResult({ ok: true, msg: "✅ Saved! Triggering data collection…" });
         setExpanded(false);
         if (onSaved) onSaved();
       } else {
-        setTestResult({ ok: false, msg: j.error || "Save failed." });
+        setTestResult({ ok: false, msg: "❌ " + (j.error || `Server error ${res.status}`) });
       }
     } catch (err) {
-      setTestResult({ ok: false, msg: err.message || "Network error." });
+      setTestResult({ ok: false, msg: "❌ " + (err.message || "Network error — is backend running?") });
     }
     setSaving(false);
   }
